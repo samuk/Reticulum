@@ -4,7 +4,7 @@
 - Sodium ION MPPT charging for <0C
 - HaLow Network device in Mikroe click format for later upgrading (Port this [XIAO one](https://oshwlab.com/robcarey/3-0067
 ))
-- Low power open hardware SBC for OpenWRT (Possibly [Avaota V861](https://www.cnx-software.com/2026/01/04/allwinner-v861-dual-core-64-bit-risc-v-ai-camera-sip-features-128mb-ddr3l-4k-h-265-h-264-video-encoder)
+- Low power open hardware SBC for OpenWRT (Possibly [Avaota V861](https://www.cnx-software.com/2026/01/04/allwinner-v861-dual-core-64-bit-risc-v-ai-camera-sip-features-128mb-ddr3l-4k-h-265-h-264-video-encoder) chips are [cheap](https://www.alibaba.com/product-detail/Allwinner-V821-ic-chip-SIP-wifi_1601384222436.html)
 - LoRa interface (On 433Mhz in EU to minimise interference using XIAO footprint)
 
 
