@@ -1,11 +1,11 @@
 
 # Reticulum network device 
 
-- Sodium ION MPPT charging for <0C
+- Sodium ION MPPT charging for <0C [Exists, needs testing](https://easyeda.com/editor#id=0b6352d4c879468b8ee60e0a43bd0ce0)
 - HaLow Network device in Mikroe click format for later upgrading (Port this [XIAO one](https://oshwlab.com/robcarey/3-0067
 ))
 - Low power open hardware SBC for OpenWRT (Possibly [Avaota V861](https://www.cnx-software.com/2026/01/04/allwinner-v861-dual-core-64-bit-risc-v-ai-camera-sip-features-128mb-ddr3l-4k-h-265-h-264-video-encoder) chips are [cheap](https://www.alibaba.com/product-detail/Allwinner-V821-ic-chip-SIP-wifi_1601384222436.html)
-- LoRa interface (On 433Mhz in EU to minimise interference using XIAO footprint)
+- LoRa interface (On 433Mhz in EU to minimise interference using [XIAO footprint/ devices](https://www.seeedstudio.com/XIAO-nRF52840-Wio-SX1262-Kit-for-Meshtastic-p-6400.html))
 
 
 
