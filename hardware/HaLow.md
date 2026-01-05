@@ -1,5 +1,7 @@
 MM8180 from Morse Micro is now at digikey for £18 There's an open hardware carrier for it in Xiao footprint and It's EU compliant. https://github.com/orgs/OpenMANET/discussions/9#discussioncomment-15278985
 
+https://oshwlab.com/robcarey/3-0067
+
 There is also a (expensive!) MM8108-EKH19, usb version docs My guess/hope would be that an open hardware version with £100 knocked off the price will be along shortly
 https://www.mouser.co.uk/ProductDetail/Morse-Micro/MM8108-EKH19-01?qs=HMhDvBYWqvOSMbg%2FkiOXMw%3D%3D
 https://www.morsemicro.com/resources/datasheets/modules/MM8108-MF15457_Data_Sheet.pdf
