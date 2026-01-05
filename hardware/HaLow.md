@@ -4,7 +4,10 @@ There is also a (expensive!) MM8108-EKH19, usb version docs My guess/hope would 
 https://www.mouser.co.uk/ProductDetail/Morse-Micro/MM8108-EKH19-01?qs=HMhDvBYWqvOSMbg%2FkiOXMw%3D%3D
 https://www.morsemicro.com/resources/datasheets/modules/MM8108-MF15457_Data_Sheet.pdf
 
-If I was to pair this with an open hardware TaishanPi and put OpenWRT I could then put Reticulum on it
+If I was to pair this with an open hardware TaishanPi or upcoming avaota board
+https://www.cnx-software.com/2026/01/04/allwinner-v861-dual-core-64-bit-risc-v-ai-camera-sip-features-128mb-ddr3l-4k-h-265-h-264-video-encoder/
+and put OpenWRT I could then put Reticulum on it
+
 https://openkits.easyeda.com/project/detail/lctspi-rk3566-1g-0g?param=baseInfo&collection=ec3dd58694bf484ca6ca2e2cbd810a99
 https://github.com/ophub/amlogic-s9xxx-openwrt
 https://github.com/gretel/reticulum-openwrt
