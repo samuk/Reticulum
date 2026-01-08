@@ -17,9 +17,11 @@ A infrastructure node for Reticulum networks plug it into a solar panel and put 
 
 
 
+
+
 # Notes
 
-
+https://github.com/RobertWCarey/esp-halow-examples/tree/master/examples
 
 MM8180 from Morse Micro is now at digikey for £18 There's an open hardware carrier for it in Xiao footprint and It's EU compliant. https://github.com/orgs/OpenMANET/discussions/9#discussioncomment-15278985
 
