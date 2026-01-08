@@ -3,9 +3,14 @@
 
 <img width="789" height="783" alt="image" src="https://github.com/user-attachments/assets/1be11858-125e-4a4a-90f3-59f5f60e9f8a" />
 
+<img width="1104" height="320" alt="image" src="https://github.com/user-attachments/assets/fe2e4ca5-541b-4409-8fdb-1921e30166f0" />
+
+
 Early [draft here](https://easyeda.com/editor#id=7934dfdd2f8c43e2b5f9d57d95ae2fb9)
 
-A infrastructure node for Reticulum networks plug it into a solar panel and put it somewhere high, it talks to other devices of the same kind, primarily over HaLow at 868/915Mhz. You get higher bandwith than LoRa (although it will not go as far) So it also has a LoRa interface at 433Mhz for client access or longer range hops where HaLow range is insufficent
+A infrastructure node for Reticulum networks plug it into a solar panel and put it somewhere high, it talks to other devices of the same kind, primarily over HaLow at 868/915Mhz. You get higher bandwith than LoRa (although it will not go as far) So it also has a LoRa interface at 433Mhz for client access or longer range hops where HaLow range is insufficent.
+
+Allwinner V861 SBC runs OpenWrt with Reticulum. Two ESP32 HaLow radios connect via UART or SPI as backbone links on separate channels. A 433 MHz LoRa module provides client access. ESP32s act purely as PHY adapters; Reticulum handles all mesh routing, multi-hop, and encryption.
 
 - Sodium ION MPPT charging for <0C PCB acts as main plug and play carrier for below comoponents. todo: Find [large capacity Sodium](https://www.aliexpress.com/item/1005010152325470.html) rated for <0C charging
 - Low power open hardware SBC for OpenWRT (Possibly [Avaota V861](https://www.cnx-software.com/2026/01/04/allwinner-v861-dual-core-64-bit-risc-v-ai-camera-sip-features-128mb-ddr3l-4k-h-265-h-264-video-encoder/) chips are [cheap](https://www.alibaba.com/product-detail/Allwinner-V821-ic-chip-SIP-wifi_1601384222436.html) [6.xx kernel WRT 21.xx](https://x.com/GLGH_/status/2005219500774560217)
