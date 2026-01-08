@@ -1,6 +1,9 @@
 
 # Reticulum network device 
 
+<img width="789" height="783" alt="image" src="https://github.com/user-attachments/assets/1be11858-125e-4a4a-90f3-59f5f60e9f8a" />
+
+
 - Sodium ION MPPT charging for <0C [Exists, needs testing](https://easyeda.com/editor#id=0b6352d4c879468b8ee60e0a43bd0ce0) acts as main plug and play carrier for below comoponents. todo: Find [large capacity Sodium](https://www.aliexpress.com/item/1005010152325470.html) rated for <0C charging
 - Low power open hardware SBC for OpenWRT (Possibly [Avaota V861](https://www.cnx-software.com/2026/01/04/allwinner-v861-dual-core-64-bit-risc-v-ai-camera-sip-features-128mb-ddr3l-4k-h-265-h-264-video-encoder/) chips are [cheap](https://www.alibaba.com/product-detail/Allwinner-V821-ic-chip-SIP-wifi_1601384222436.html) [6.xx kernel WRT 21.xx](https://x.com/GLGH_/status/2005219500774560217)
 - Two HaLow Network devices in XIAO format for later upgrading [XIAO HaLow](https://oshwlab.com/robcarey/3-0067)
@@ -9,7 +12,6 @@
 ![alt text](https://www.cnx-software.com/wp-content/uploads/2026/01/Allwinner-V861-dual-camera-board-720x543.webp "Avaota SBC")
 
 
-![alt text](https://www.cnx-software.com/wp-content/uploads/2026/01/Allwinner-V861-dual-camera-board-720x543.webp "Avaota SBC")
 
 
 # Notes
