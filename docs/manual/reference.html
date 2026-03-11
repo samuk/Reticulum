@@ -3,11 +3,11 @@
   <head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="prev" title="Code Examples" href="examples.html">
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="prev" title="Reticulum License" href="license.html">
         <link rel="prefetch" href="_static/rns_logo_512.png" as="image">
 
     <!-- Generated with Sphinx 8.2.3 and Furo 2025.09.25.dev1 -->
-        <title>API Reference - Reticulum Network Stack 1.1.0 documentation</title>
+        <title>API Reference - Reticulum Network Stack 1.1.3 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=580074bf" />
     <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
@@ -180,7 +180,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">Reticulum Network Stack 1.1.0 documentation</div></a>
+      <a href="index.html"><div class="brand">Reticulum Network Stack 1.1.3 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -204,7 +204,7 @@
     <img class="sidebar-logo" src="_static/rns_logo_512.png" alt="Logo"/>
   </div>
   
-  <span class="sidebar-brand-text">Reticulum Network Stack 1.1.0 documentation</span>
+  <span class="sidebar-brand-text">Reticulum Network Stack 1.1.3 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -215,6 +215,8 @@
   <ul>
 <li class="toctree-l1"><a class="reference internal" href="whatis.html">What is Reticulum?</a></li>
 <li class="toctree-l1"><a class="reference internal" href="gettingstartedfast.html">Getting Started Fast</a></li>
+<li class="toctree-l1"><a class="reference internal" href="zen.html">Zen of Reticulum</a></li>
+<li class="toctree-l1"><a class="reference internal" href="software.html">Programs Using Reticulum</a></li>
 <li class="toctree-l1"><a class="reference internal" href="using.html">Using Reticulum on Your System</a></li>
 <li class="toctree-l1"><a class="reference internal" href="understanding.html">Understanding Reticulum</a></li>
 <li class="toctree-l1"><a class="reference internal" href="hardware.html">Communications Hardware</a></li>
@@ -222,6 +224,7 @@
 <li class="toctree-l1"><a class="reference internal" href="networks.html">Building Networks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="support.html">Support Reticulum</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Code Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="license.html">Reticulum License</a></li>
 </ul>
 <ul class="current">
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#">API Reference</a></li>
@@ -427,6 +430,17 @@ blackhole lists are sourced.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>A list of identity hashes.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="RNS.Reticulum.discovered_interfaces">
+<em class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">discovered_interfaces</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#RNS.Reticulum.discovered_interfaces" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a list of interfaces discovered over the network.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A list of discovered interfaces.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -2218,14 +2232,14 @@ will announce it.</p>
         
         <div class="related-pages">
           
-          <a class="prev-page" href="examples.html">
+          <a class="prev-page" href="license.html">
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
               <div class="page-info">
                 <div class="context">
                   <span>Previous</span>
                 </div>
                 
-                <div class="title">Code Examples</div>
+                <div class="title">Reticulum License</div>
                 
               </div>
             </a>
@@ -2272,6 +2286,7 @@ will announce it.</p>
 <li><a class="reference internal" href="#RNS.Reticulum.required_discovery_value"><code class="docutils literal notranslate"><span class="pre">required_discovery_value()</span></code></a></li>
 <li><a class="reference internal" href="#RNS.Reticulum.publish_blackhole_enabled"><code class="docutils literal notranslate"><span class="pre">publish_blackhole_enabled()</span></code></a></li>
 <li><a class="reference internal" href="#RNS.Reticulum.blackhole_sources"><code class="docutils literal notranslate"><span class="pre">blackhole_sources()</span></code></a></li>
+<li><a class="reference internal" href="#RNS.Reticulum.discovered_interfaces"><code class="docutils literal notranslate"><span class="pre">discovered_interfaces()</span></code></a></li>
 <li><a class="reference internal" href="#RNS.Reticulum.interface_discovery_sources"><code class="docutils literal notranslate"><span class="pre">interface_discovery_sources()</span></code></a></li>
 </ul>
 </li>
@@ -2457,7 +2472,7 @@ will announce it.</p>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=fc837d61"></script>
+</div><script src="_static/documentation_options.js?v=cb7bf70b"></script>
     <script src="_static/doctools.js?v=9bcbadda"></script>
     <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>
