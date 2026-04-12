@@ -1,4 +1,8 @@
 
+
+
+[WIP bridge hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)
+
 ### **Meshcore Bridge System**
 
 This system utilises a higher-speed **2.4GHz Reticulum backbone** to interconnect separate **868MHz MeshCore** islands. It functions as a high-capacity trunk line, allowing local meshes to communicate over long distances without saturating the slower 868MHz frequency.
