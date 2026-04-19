@@ -4,8 +4,8 @@
 **Supersedes:** meshcore_bridge_spec_v2.md  
 **Companion document:** [LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging (Botterell, KD6O)](https://github.com/artbotterell/CoreNet) 
 **Upstream firmware base:** RTNode-2400 (GrayHatGuy / jrl290), microReticulum (attermann), RNode Firmware (markqvist)  
-**License:** GPL-3.0 (inherited)
 **Author** A well known word-guessing machine with some input from samuk
+**License:** GPL-3.0 (inherited)
 
 ---
 
