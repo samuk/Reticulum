@@ -1,16 +1,26 @@
-# MeshCore–Reticulum Bridge Node: Technical Specification v2
+# MeshCore–Reticulum Bridge Node: Technical Specification v3
 
 **Status:** Draft for community review  
-**Supersedes:** meshcore_bridge_spec.md (v1)  
-**Companion document:** LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging (Botterell, KD6O)
+**Supersedes:** meshcore_bridge_spec_v2.md  
+**Companion document:** LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging (Botterell, KD6O)  
+**Upstream firmware base:** RTNode-2400 (GrayHatGuy / jrl290), microReticulum (attermann), RNode Firmware (markqvist)  
+**License:** GPL-3.0 (inherited)
 
 ---
 
 ## Overview
 
-This specification describes a dual-radio bridge node connecting a local 868 MHz MeshCore mesh to a 2.4 GHz Reticulum backbone. The backbone carries inter-region LXMF messages between bridge nodes. It does not carry MeshCore advertisements, position data, or any traffic that causes flood amplification on the local RF medium.
+This specification describes a dual-MCU MeshCore–Reticulum bridge node consisting of:
 
-**The governing constraint:** the local 868 MHz mesh behaves identically whether or not a bridge is present. The bridge is invisible to local nodes except as a single gateway contact. The mesh works when the bridge is down.
+- **MCU 1 (MeshCore side):** Seeed XIAO nRF52840 + Wio SX1262, running MeshCore firmware with a bridge companion layer
+- **MCU 2 (Reticulum side):** Seeed XIAO ESP32-S3 + Wio SX1262, running RTNode-2400 (microReticulum boundary node)
+- **Interconnect:** UART with RTS/CTS hardware flow control
+
+RTNode-2400 provides a working, tested microReticulum boundary node implementation on ESP32-S3 with empirically measured RAM usage of ~29% (94 KB of 327 KB) in boundary mode. This eliminates the need to implement Reticulum from scratch and is the primary architectural change from v2.
+
+The MeshCore bridge logic — gateway contact registration, LXMF identity mapping, hop-count-zero ingress delivery, and contact manifest — is implemented as a companion layer on MCU 1, sitting between the MeshCore radio stack and the UART link to MCU 2.
+
+**The governing constraint throughout:** the local 868 MHz mesh behaves identically whether or not the bridge is present. The bridge is invisible to local nodes except as a single gateway contact. The mesh works when the bridge is down.
 
 ---
 
@@ -20,59 +30,86 @@ This specification describes a dual-radio bridge node connecting a local 868 MHz
 
 | Component | Part | Role |
 |---|---|---|
-| MCU 1 (Access) | Seeed XIAO nRF52840 + Wio SX1262 | 868 MHz MeshCore last-mile |
-| MCU 2 (Backbone) | Seeed XIAO nRF52840 + Mikroe SX1280 | 2.4 GHz Reticulum backbone |
-| Storage | 8 MB SPI Flash (W25Q64, on Wio board) | Store-and-forward buffer |
-| Interconnect | UART + RTS/CTS hardware flow control | MCU-to-MCU link |
+| MCU 1 | Seeed XIAO nRF52840 | MeshCore host, bridge companion layer |
+| MCU 1 radio | Seeed Wio SX1262 shield | 868 MHz MeshCore last-mile |
+| MCU 2 | Seeed XIAO ESP32-S3 (8 MB PSRAM variant) | RTNode-2400 / microReticulum |
+| MCU 2 radio | Seeed Wio SX1262 shield | RNode interface to Reticulum backbone |
+| Backbone transport | WiFi (built into ESP32-S3) | TCP connection to Reticulum backbone |
+| Interconnect | UART + RTS/CTS | MCU 1 ↔ MCU 2 bridge link |
 
-### 1.2 Rationale for 2.4 GHz Backbone
+**Note on MCU 2 radio:** RTNode-2400 on XIAO ESP32-S3 currently supports SX1262 (confirmed working, boundary mode verified per upstream README). The backbone transport is WiFi TCP to an rnsd instance or rmap.world — not a second LoRa radio. A second SX1262 on MCU 2 provides the RNode interface that RTNode-2400 uses for its LoRa interface in `MODE_ACCESS_POINT`. This is optional if WiFi-only backbone is sufficient; include it if RF backbone hops are needed.
 
-Sub-1 GHz options in the EU are constrained:
-- 869.525 MHz (Meshtastic default, 250 kHz BW): occupied
-- 869.618 MHz (MC Narrow default, 62.5 kHz BW): occupied
-- 869.4–869.65 MHz sub-band: 10% duty cycle but largely filled by above
-- 865.2 MHz: clean but 1% duty cycle, 25 mW EIRP
+**Note on PSRAM:** The XIAO ESP32-S3 Plus Sense board has 8 MB PSRAM. RTNode-2400 boundary mode uses TLSF allocation from PSRAM when available. Use the PSRAM variant; the non-PSRAM variant has been confirmed to fall back to ~170 KB internal SRAM which is tighter.
 
-The SX1280 at 2.4 GHz avoids all of these constraints. It provides up to 1.6 Mbps at LoRa mode (versus ~5 kbps for 868 MHz LoRa), handles LXMF store-and-forward at meaningful throughput, and needs no EU licence. The tradeoff is range: expect 500–800 m urban, 2–3 km line-of-sight from elevated nodes. For a backbone between infrastructure nodes with rooftop or elevated placement, this is acceptable.
+### 1.2 Backbone Transport
 
-**2.4 GHz channel plan (SX1280, EU):**
+MCU 2 connects to the Reticulum backbone via WiFi TCP using RTNode-2400's existing boundary mode. The backbone host is configurable via RTNode-2400's captive portal (SSID, password, backbone host:port). No additional backbone radio hardware is required for a WiFi-connected deployment.
 
-SX1280 LoRa coexists poorly with Wi-Fi on channels 1 (2412 MHz), 6 (2437 MHz), and 11 (2462 MHz), each 20–40 MHz wide. Use the following centre frequencies which fall in gaps between common Wi-Fi channels:
-
-| Backbone channel | Centre frequency | Clear of Wi-Fi ch. |
-|---|---|---|
-| B1 (primary) | 2425 MHz | Between ch.1 and ch.6 |
-| B2 (alternate) | 2450 MHz | Between ch.6 and ch.11 |
-| B3 (fallback) | 2479 MHz | Above ch.11 |
-
-Use B1 by default. Configure B2 or B3 if a site survey shows sustained Wi-Fi interference. All three use 800 kHz LoRa bandwidth, SF7, giving approximately 150 kbps throughput — adequate for LXMF messaging backbone traffic.
+**WiFi channel coexistence note:** The XIAO ESP32-S3 WiFi operates at 2.4 GHz. Both MCU 1 and MCU 2 carry SX1262 radios on the Wio shield at 868 MHz. There is no RF conflict between the 2.4 GHz WiFi and the 868 MHz LoRa radios.
 
 ### 1.3 Interconnect Wiring
 
 ```
-MCU 1 (Access)              MCU 2 (Backbone)
-──────────────              ────────────────
+MCU 1 nRF52840              MCU 2 ESP32-S3
+──────────────              ──────────────
 TX   D6  ──────────────►    RX   D7
 RX   D7  ◄──────────────    TX   D6
 CTS  D8  ◄──────────────    RTS  D9
 RTS  D9  ──────────────►    CTS  D8
-3V3      ────────────────   3V3   (if powered from MCU1)
+3V3      ────────────────   3V3   (if powered from MCU1; check current budget)
 GND      ────────────────   GND
 ```
 
-**Flow control:** MCU 1 pulls CTS HIGH when:
-- SX1262 is actively transmitting (TX_DONE interrupt not yet received), or
+**Flow control:** MCU 1 asserts CTS HIGH when:
+- SX1262 TX_DONE interrupt has not yet been received (radio actively transmitting), or
 - Local receive queue depth exceeds 12 packets (75% of 16-packet buffer)
 
-MCU 2 halts UART output immediately on CTS HIGH. Resumes on CTS LOW. MCU 2 must buffer at least 2 packets in RAM to absorb CTS latency — do not assume instantaneous halt.
+MCU 2 halts UART output immediately on CTS HIGH. MCU 2 must buffer at least 2 packets in RAM to absorb CTS assertion latency — do not assume instantaneous halt.
 
-**Baud rate:** 115200. Bottleneck is 868 MHz airtime (~5 kbps effective), not UART.
+**Baud rate:** 115200. The bottleneck is 868 MHz airtime (~5 kbps effective), not UART.
 
 ---
 
-## 2. Packet Framing (UART)
+## 2. Firmware Overview
 
-MeshCore lacks KISS framing. The following length-prefixed frame format is used on the UART link between MCU 1 and MCU 2. It is not MeshCore's wire format — it is a transport envelope for inter-MCU communication only.
+### 2.1 MCU 2 — RTNode-2400 (No Modifications Required)
+
+MCU 2 runs RTNode-2400 `seeed_xiao_esp32s3_boundary` build without modification. It operates as a standard Reticulum boundary transport node:
+
+- LoRa interface in `MODE_ACCESS_POINT`: blocks backbone announces from crossing to RF
+- TCP backbone interface in `MODE_BOUNDARY`: selective caching, backbone paths evicted first
+- Path table capped at 48 entries; hash list at 32; announce queue at 4
+- Backbone announces cached to flash, served on demand when local nodes request paths
+- Default route forwarding: unroutable packets from LoRa forwarded to backbone
+
+The only addition required on MCU 2 is **UART serial input/output** handling to forward LXMF-encapsulated MeshCore packets between the UART link and the Reticulum stack. This is a new serial interface type, not a modification to existing interfaces. It can be implemented as a thin shim that reads framed packets from UART and injects them into the microReticulum packet pipeline, and vice versa.
+
+**MCU 2 memory budget (empirical, from RTNode-2400 README):**
+
+```
+XIAO ESP32-S3 boundary build:
+  RAM:   28.8% used  (94,492 bytes of 327,680)
+  Flash: 27.0% used  (1,768,825 bytes of 6,553,600)
+```
+
+Headroom is comfortable. The UART shim adds negligible RAM overhead.
+
+### 2.2 MCU 1 — MeshCore + Bridge Companion Layer
+
+MCU 1 runs MeshCore firmware (companion or repeater role as appropriate) with an additional bridge companion layer that intercepts relevant packets and manages the UART link to MCU 2. This layer does not modify MeshCore's core routing behaviour.
+
+The bridge companion layer responsibilities:
+- On boot: register one gateway contact on the local MeshCore mesh
+- Intercept outbound MeshCore packets addressed to the gateway contact and forward via UART
+- Receive inbound LXMF payloads from MCU 2 via UART and deliver to addressed local nodes with hop count 0
+- Maintain a local manifest of reachable MeshCore nodes for MCU 2 to serve remotely
+- Manage CTS flow control
+
+---
+
+## 3. UART Framing Protocol
+
+MeshCore lacks KISS framing. The following length-prefixed frame format is used on the UART link. It is an inter-MCU transport envelope, not MeshCore's wire format.
 
 ```
 Byte offset   Length   Field
@@ -83,364 +120,314 @@ Byte offset   Length   Field
 3–4           2        Payload length, big-endian uint16 (max 512)
 5–N           N        Payload
 N+1–N+2       2        CRC-16/CCITT over bytes 2..N inclusive
+                       (polynomial 0x1021, init 0xFFFF)
 ```
+
+If LEN > 512, emit error frame type 0xFF with error code 0x03 and return to WAIT_MAGIC1 immediately. Do not wait for the declared number of bytes — a corrupted length field will otherwise stall the receiver indefinitely.
 
 **Packet types:**
 
-| Type byte | Direction | Meaning |
+| Type | Direction | Meaning |
 |---|---|---|
-| 0x01 | MCU1 → MCU2 | MeshCore packet for backbone delivery |
+| 0x01 | MCU1 → MCU2 | MeshCore packet for LXMF delivery via backbone |
 | 0x02 | MCU2 → MCU1 | LXMF payload for local delivery |
-| 0x03 | MCU1 → MCU2 | Gateway contact registration request |
-| 0x04 | MCU2 → MCU1 | Manifest entry (response to 0x05) |
-| 0x05 | MCU1 → MCU2 | Manifest query |
+| 0x03 | MCU1 → MCU2 | Gateway contact registration (LXMF hash request) |
+| 0x04 | MCU2 → MCU1 | Gateway LXMF hash response |
+| 0x05 | MCU1 → MCU2 | Manifest entry push (local node seen) |
 | 0x06 | Both | Delivery receipt / ACK |
-| 0xFF | Both | Error frame (payload = 1-byte error code) |
+| 0xFF | Both | Error frame (1-byte error code in payload) |
 
-**CRC:** CRC-16/CCITT (polynomial 0x1021, init 0xFFFF). Standard implementation available in Arduino `CRC16.h` and Zephyr `sys/crc.h`.
+**Error codes:**
 
-**Framing receiver state machine (both MCUs):**
+| Code | Meaning |
+|---|---|
+| 0x01 | CRC failure |
+| 0x02 | Destination node not local |
+| 0x03 | Payload length exceeds maximum |
+| 0x04 | Unknown packet type |
+
+**Receiver state machine (both MCUs):**
 
 ```
-WAIT_MAGIC1 → (0xAA) → WAIT_MAGIC2 → (0x55) → READ_TYPE →
-READ_LEN_H → READ_LEN_L → READ_PAYLOAD[0..LEN-1] → CHECK_CRC →
-  CRC OK:   dispatch(type, payload)
-  CRC FAIL: emit error frame 0x01, return to WAIT_MAGIC1
+WAIT_MAGIC1 → recv 0xAA → WAIT_MAGIC2
+WAIT_MAGIC2 → recv 0x55 → READ_TYPE
+            → recv other → WAIT_MAGIC1
+READ_TYPE   → store type, advance → READ_LEN_H
+READ_LEN_H  → store len_h, advance → READ_LEN_L
+READ_LEN_L  → len = (len_h<<8)|len_l
+            → if len > 512: emit 0xFF/0x03, goto WAIT_MAGIC1
+            → else: advance → READ_PAYLOAD
+READ_PAYLOAD→ accumulate len bytes → READ_CRC_H
+READ_CRC_H  → store crc_h → READ_CRC_L
+READ_CRC_L  → crc = (crc_h<<8)|crc_l
+            → verify CRC-16/CCITT over [type, len_h, len_l, payload]
+            → CRC OK:   dispatch(type, payload), goto WAIT_MAGIC1
+            → CRC FAIL: emit 0xFF/0x01, goto WAIT_MAGIC1
 ```
 
-On any unexpected byte in WAIT_MAGIC1/WAIT_MAGIC2, return to WAIT_MAGIC1. Do not implement timeouts for framing — use CRC failure detection instead.
+Do not use timeouts for framing. CRC failure is the recovery mechanism.
 
 ---
 
-## 3. Addressing and Identity
+## 4. Addressing and Identity
 
-### 3.1 MeshCore Node Identity
+### 4.1 Bridge LXMF Identity
 
-MeshCore nodes are identified by 32-byte Ed25519 public keys. The first byte of the public key is used as a short display identifier in the MeshCore UI.
+On boot, MCU 1 sends a type 0x03 frame to MCU 2 requesting the bridge's LXMF destination hash. MCU 2 responds with type 0x04 containing the 16-byte hash derived from RTNode-2400's Reticulum identity (Curve25519 public key, generated on first boot and persisted in ESP32-S3 NVS).
 
-### 3.2 Reticulum / LXMF Identity for the Bridge
+MCU 1 uses this hash as the `lxmf_hash` field in the gateway contact it registers on the local MeshCore mesh. If MCU 2 is unreachable at boot, MCU 1 retries every 30 seconds. MCU 1 does not register a gateway contact until it has received a valid type 0x04 response.
 
-On first boot, MCU 2 generates a Curve25519 keypair using the nRF52840's hardware RNG:
+### 4.2 MeshCore Node → LXMF Destination Mapping
 
-```c
-uint8_t bridge_private_key[32];  // Curve25519 scalar
-uint8_t bridge_public_key[32];   // Curve25519 point
-nrf_crypto_rng_vector_generate(bridge_private_key, 32);
-curve25519_donna(bridge_public_key, bridge_private_key, basepoint);
-```
-
-Store both in non-volatile memory (nRF52840 internal flash, not the SPI flash). Never regenerate unless explicitly reset by the operator.
-
-The LXMF destination hash for the bridge is the first 16 bytes of SHA-256(bridge_public_key). This is the address MCU 1 registers as the gateway contact's LXMF hash and advertises to the local mesh.
-
-### 3.3 Mapping MeshCore Node Keys to LXMF Destinations
-
-Each MeshCore node reachable through this bridge needs a stable LXMF destination so remote bridges can address it directly. Derive this deterministically from the MeshCore Ed25519 public key using HKDF-SHA256 as follows:
+Each MeshCore node reachable through this bridge needs a stable LXMF destination. Derive deterministically from the MeshCore Ed25519 public key using HKDF-SHA256:
 
 ```
 Inputs:
-  IKM  = meshcore_ed25519_public_key   (32 raw bytes, little-endian as stored by MeshCore)
-  Salt = SHA-256("meshcore-lxmf-bridge-v1")   (32 bytes, computed once at build time)
-  Info = "lxmf-destination-v1"                (UTF-8, no null terminator)
-  L    = 32 bytes
+  IKM  = meshcore_ed25519_pubkey        (32 bytes, raw little-endian)
+  Salt = 0x3f2a1b8e...                  (32 bytes — see note below)
+  Info = "lxmf-destination-v1"          (UTF-8, no null terminator)
+  L    = 32 bytes output
 
-Output:
-  lxmf_dest_preimage = HKDF-SHA256(IKM, Salt, Info, L)
+Intermediate:
+  lxmf_preimage = HKDF-SHA256(IKM, Salt, Info, 32)
 
 LXMF destination hash:
-  lxmf_dest_hash = first 16 bytes of SHA-256(lxmf_dest_preimage)
+  lxmf_dest_hash = SHA-256(lxmf_preimage)[0:16]   (first 16 bytes)
 ```
 
-**Computed at build time, for reference:**
+**Salt value — computed once, hardcoded in both MCUs:**
+
 ```
 Salt = SHA-256("meshcore-lxmf-bridge-v1")
-     = 3f8a2c... (implementor must compute and hardcode)
+
+To compute:
+  python3 -c "import hashlib; print(hashlib.sha256(b'meshcore-lxmf-bridge-v1').hexdigest())"
 ```
 
-This derivation is:
-- Deterministic: same MeshCore key always produces same LXMF destination
-- One-way: LXMF destination does not reveal the MeshCore key
-- Collision-resistant: 128-bit output space
-- Verifiable: any bridge can re-derive and verify the mapping
+This value must be computed by the implementor, verified independently, and hardcoded in both MCU 1 and MCU 2 firmware as a 32-byte constant. It must be identical across all bridge implementations for interoperability. A reference value should be published in the project repository before first release and treated as a protocol constant thereafter.
 
-**Reverse mapping** (LXMF destination → MeshCore display name) is handled by the contact manifest (Section 5). A node reachable but absent from any manifest is unresolvable by display name — the bridge should present it as `[unknown:HASH_PREFIX_4]` using the first 4 hex chars of the LXMF destination hash. This is the expected state for new nodes before first manifest synchronisation.
+**Why HKDF rather than direct Ed25519→Curve25519 conversion:**  
+Direct conversion is mathematically possible but requires explicit access to the Ed25519 scalar, which is not exposed by the nRF52840 Mbed TLS / nrf_crypto API. HKDF from the public key is implementable with standard primitives on both MCUs and produces a stable, one-way mapping.
+
+**Reverse mapping** (LXMF destination → MeshCore display name) is handled by the contact manifest (Section 6). A node present in the bridge's coverage area but not yet in any manifest is displayed as `[unknown:XXXX]` where XXXX is the first 4 hex characters of the LXMF destination hash.
 
 ---
 
-## 4. MCU 1 — Access Firmware (868 MHz / MeshCore)
+## 5. MCU 1 Bridge Companion Layer
 
-### 4.1 Responsibilities
+### 5.1 Gateway Contact Registration
 
-- Interface with local MeshCore mesh as a companion node
-- Register and maintain a single gateway contact on the local mesh
-- Receive outbound packets from local nodes addressed to the gateway and forward to MCU 2
-- Receive inbound LXMF payloads from MCU 2 and deliver to addressed local nodes with hop count 0
-- Manage CTS flow control
-
-### 4.2 Gateway Contact Registration
-
-On boot, after MeshCore companion initialisation, register one contact:
+After receiving the LXMF hash from MCU 2 (type 0x04), MCU 1 registers one contact on the local MeshCore mesh:
 
 ```c
 struct GatewayContact {
-    char     display_name[32];    // "[GW-{REGION}]", e.g. "[GW-UK1]"
-    uint8_t  contact_type;        // REPEATER (or BRIDGE if added upstream)
-    uint8_t  lxmf_hash[16];       // Bridge LXMF destination hash from MCU 2
-    uint8_t  hop_count;           // 1 — bridge is one hop from local nodes
-    int8_t   rssi;                // Measured UART link RSSI proxy: use 0 (unknown)
-    uint8_t  snr;                 // Use 0 (unknown)
+    char    display_name[32];   // "[GW-{REGION}]" e.g. "[GW-UK1]"
+    uint8_t contact_type;       // REPEATER (or BRIDGE if added upstream)
+    uint8_t lxmf_hash[16];      // From MCU2 type 0x04 response
+    uint8_t hop_count;          // 1 — bridge is one hop from local nodes
 };
 ```
 
 **Do not:**
-- Set hop count to 0 (that means local direct)
-- Set link quality to maximum (dishonest, causes routing pathologies)
-- Register more than one gateway contact regardless of how many remote nodes are reachable through it
-- Re-register on every boot if the contact already exists in the local node database
+- Set hop_count to 0 (reserved for direct local contacts)
+- Force link quality to maximum (dishonest, causes routing pathologies)
+- Register more than one gateway contact regardless of how many remote nodes are reachable
+- Re-register on every boot if the contact and lxmf_hash are unchanged in persistent storage
 
-Re-register only if the LXMF hash changes (i.e., MCU 2 was reset and generated a new identity).
+Re-register only if the lxmf_hash changes, which happens only if MCU 2 is factory-reset. Re-advertise the gateway contact every 4 hours to match MeshCore repeater advert interval.
 
-### 4.3 Inbound Delivery (Backbone → Local)
+### 5.2 Inbound Delivery (Backbone → Local, MCU2 → MCU1)
 
 ```
 Receive type 0x02 frame from MCU 2
 Verify CRC
-Extract: destination_meshcore_pubkey[32], meshcore_payload[N]
-Find local node matching destination_meshcore_pubkey
+Extract from payload:
+  dest_meshcore_pubkey[32]
+  meshcore_payload[N]
+Find local MeshCore node matching dest_meshcore_pubkey
 If found:
-    Deliver meshcore_payload directly to node via SX1262
-    Set MeshCore hop limit field to 0 in delivered packet
-    Send type 0x06 ACK to MCU 2 with delivery status
+  Deliver meshcore_payload to node via SX1262
+  Set MeshCore hop limit field to 0 in delivered packet
+  Send type 0x06 ACK to MCU 2
 If not found:
-    Send type 0xFF error 0x02 (node not local) to MCU 2
+  Send type 0xFF error 0x02 to MCU 2
 ```
 
-Hop limit 0 means the packet is not re-flooded by any MeshCore repeater that hears it. This is mandatory.
+Hop limit 0 is mandatory. It prevents the packet being re-flooded by any MeshCore repeater that receives it.
 
-### 4.4 Outbound Handling (Local → Backbone)
+### 5.3 Outbound Handling (Local → Backbone, MCU1 → MCU2)
 
 ```
 Receive MeshCore packet addressed to gateway contact
-Extract: source_pubkey[32], destination_pubkey[32], payload[N]
-Check destination_pubkey is NOT a local node (would be a routing error)
-Build type 0x01 frame:
-    payload = source_pubkey[32] || destination_pubkey[32] || meshcore_payload[N]
-Send to MCU 2 via UART (respecting CTS)
+Extract:
+  source_pubkey[32]
+  destination_pubkey[32]
+  meshcore_payload[N]
+Verify destination_pubkey is NOT a locally reachable node (routing error if so)
+Build type 0x01 payload:
+  source_pubkey[32] || destination_pubkey[32] || meshcore_payload[N]
+Send to MCU 2 via UART (honour CTS)
 ```
+
+### 5.4 Manifest Push
+
+When MCU 1 hears a MeshCore node on the local 868 MHz mesh (new node or updated last_seen), it pushes a type 0x05 manifest entry to MCU 2:
+
+```
+Type 0x05 payload (90 bytes):
+  Byte 0:      Version = 0x01
+  Bytes 1–32:  MeshCore Ed25519 public key (raw)
+  Bytes 33–48: LXMF destination hash (derived per Section 4.2)
+  Bytes 49–64: Display name (UTF-8, null-padded to 16 bytes)
+  Bytes 65–68: Last seen Unix timestamp (uint32 big-endian)
+  Bytes 69–76: Region tag (ASCII, null-padded, e.g. "UK-WAL\0\0")
+  Byte  77:    Opt-in flags (bit 0: position shared)
+  Bytes 78–81: Latitude (int32 microdegrees, 0 if not opted in)
+  Bytes 82–85: Longitude (int32 microdegrees, 0 if not opted in)
+  Bytes 86–89: Position quantisation radius in metres (uint32, min 3000)
+```
+
+MCU 2 stores these entries and serves them as the contact manifest when queried by remote bridges. MCU 1 sends a manifest entry:
+- When a new node is first heard
+- When a known node's last_seen advances by more than 10 minutes
+- On bridge boot (replay all known local nodes to resync MCU 2)
+
+MCU 1 removes a node from its local manifest and sends an update with last_seen = 0 when a node has not been heard for 24 hours.
 
 ---
 
-## 5. MCU 2 — Backbone Firmware (2.4 GHz / Reticulum)
+## 6. MCU 2 UART Shim (RTNode-2400 Addition)
 
-### 5.1 Responsibilities
+RTNode-2400 runs unmodified except for one addition: a UART serial interface shim that bridges the UART link to the microReticulum packet pipeline.
 
-- Run Reticulum stack on SX1280 via RadioLib
-- Maintain LXMF identity and destination mappings
-- Route outbound LXMF messages onto backbone
-- Receive inbound LXMF messages and queue for local delivery via MCU 1
-- Publish and respond to contact manifests
-- Manage SPI bus arbitration between SX1280 and flash
-- Fast-path transit traffic in RAM
+### 6.1 What the Shim Does
 
-### 5.2 SPI Bus Arbitration
+The shim is a new interface type alongside the existing LoRa and TCP interfaces. It:
 
-SX1280 and W25Q64 flash share the SPI bus. Both use separate chip-select lines. The SX1280 DIO1 interrupt pre-empts flash operations:
+1. Reads framed packets from UART (type 0x01 from MCU 1)
+2. Unpacks source/destination MeshCore pubkeys and payload
+3. Derives LXMF destination hash for the destination pubkey (per Section 4.2)
+4. Constructs an LXMF message addressed to the derived destination
+5. Injects into the microReticulum send pipeline (same path as any outbound LXMF message)
 
-```c
-volatile bool flash_op_suspended = false;
+Inbound (backbone → local):
+1. microReticulum delivers an LXMF message addressed to a locally-registered MeshCore node destination
+2. Shim extracts destination MeshCore pubkey (reverse-mapped from LXMF hash via manifest)
+3. Builds type 0x02 frame with dest pubkey and decrypted payload
+4. Sends to MCU 1 via UART (honour CTS)
 
-// SX1280 DIO1 ISR — highest priority
-void sx1280_dio1_isr(void) {
-    if (flash_op_in_progress()) {
-        w25q64_suspend_write();    // Issue 0x75 suspend command
-        flash_op_suspended = true;
-    }
-    sx1280_service_irq();          // Read packet or handle TX done
-    if (flash_op_suspended) {
-        w25q64_resume_write();     // Issue 0x7A resume command
-        flash_op_suspended = false;
-    }
-}
-```
+### 6.2 Type 0x03 / 0x04 — LXMF Hash Handshake
 
-The W25Q64 supports Program/Erase Suspend (command 0x75) and Resume (0x7A). Maximum suspend latency is 20 µs — acceptable for LoRa packet handling.
-
-### 5.3 Flash Layout and Store-and-Forward Buffer
-
-The W25Q64 has 8 MB = 2048 × 4 KB sectors. MeshCore packets are typically 64–256 bytes. Allocating one 4 KB sector per packet wastes 94–98% of each sector.
-
-Instead, use a packed record format within sectors:
+On receiving type 0x03 from MCU 1, MCU 2 responds with type 0x04:
 
 ```
-Flash layout:
-  Sector 0 (4 KB):    Metadata region
-    Bytes 0–1:        Magic 0xBE 0xEF (sanity check)
-    Bytes 2–3:        Format version (0x0001)
-    Bytes 4–7:        Absolute write offset (uint32, byte-addressed within data region)
-    Bytes 8–11:       Absolute read offset (uint32, byte-addressed within data region)
-    Bytes 12–15:      Packet count (uint32)
-    Bytes 16–19:      Total bytes written lifetime (uint32, for endurance tracking)
-    Bytes 20–4095:    Reserved / operator config
-
-  Sectors 1–2047 (8 MB - 4 KB = 8,384 KB): Data region
-    Packed variable-length records:
-      Bytes 0–1:      Record length (uint16, length of payload field only, max 512)
-      Bytes 2–3:      Record flags (bit 0: valid, bit 1: delivered)
-      Bytes 4–N:      Payload (source[32] || dest[32] || meshcore_data[N-64])
-      Bytes N+1–N+2:  CRC-16/CCITT over payload
+Type 0x04 payload (16 bytes):
+  bridge_lxmf_dest_hash[16]   — derived from RTNode-2400's Reticulum identity
 ```
 
-Records are written sequentially. Write offset advances by (4 + payload_len + 2) per record, aligned to 2 bytes. When write offset reaches end of data region, wrap to start of data region (circular).
+This hash is stable across reboots (RTNode-2400 persists its Reticulum identity in NVS). It changes only on factory reset.
 
-**Sector erase before write:** Before writing into a new sector, erase it (W25Q64 sector erase command 0x20, ~150 ms). Do not erase sectors ahead of the read pointer — check that write pointer sector ≠ read pointer sector before erasing.
+### 6.3 Manifest Storage and Service
 
-**Flash endurance calculation:**
-- W25Q64: 100,000 erase cycles per sector
-- 2047 data sectors × 100,000 cycles = 204,700,000 total sector erases
-- At 1 packet/second average, 256 bytes/packet: sector fills in ~16 seconds, erased ~5,400 times/day
-- Endurance: 204,700,000 / 5,400 = ~37,900 days ≈ **103 years**
+MCU 2 stores manifest entries received via type 0x05 frames in flash (SPIFFS/LittleFS partition, separate from RTNode-2400's existing log partition). It serves these as an LXMF resource at destination aspect `meshcore.bridge.manifest` when queried by remote bridges.
 
-At 10× sustained load (10 packets/second): ~10 years. Flash endurance is not a concern at realistic messaging traffic volumes. It would become a concern if used for high-rate telemetry — do not use this bridge for telemetry bridging.
+**Manifest entry format on disk:** identical to the type 0x05 payload (90 bytes per entry), stored as a flat array. Maximum 64 entries (5,760 bytes) — adequate for a local mesh of typical size.
 
-**Metadata sector write frequency:** Metadata (offsets, count) is updated on every packet write and read. The metadata sector will exhaust at:
-- 100,000 cycles / (writes_per_second × 2) = 100,000 / 2 = 50,000 seconds at 1 pkt/s ≈ **14 hours**
+**Manifest signing:** MCU 2 signs the serialised manifest with its Reticulum identity private key before serving. Remote bridges verify the signature against the bridge's known public key (obtainable from the Reticulum announce).
 
-This is unacceptable. Mitigate by:
-1. Buffering metadata updates in RAM and flushing to flash every 60 seconds or on clean shutdown
-2. Using a wear-levelled metadata region across 8 sectors (sector 0–7), rotating on each flush
+### 6.4 Flash Partition Consideration
 
-Implement option 1 minimum. Option 2 for production.
-
-### 5.4 Fast-Path Transit
-
-Transit packets are those whose LXMF destination does not match the local bridge or any locally reachable MeshCore node. They should be re-transmitted on the backbone immediately without touching flash:
-
-```c
-void handle_inbound_lxmf(LXMFMessage *msg) {
-    if (is_local_destination(msg->dest_hash)) {
-        // Queue for local delivery via MCU 1
-        flash_fifo_write(msg);
-    } else {
-        // Transit: re-transmit on backbone from RAM
-        reticulum_send(msg);  // Non-blocking, uses TX queue in RAM
-    }
-}
-```
-
-### 5.5 Contact Manifest
-
-The bridge publishes a signed manifest of locally reachable MeshCore nodes at Reticulum resource path `meshcore.bridge.manifest`.
-
-**Manifest entry (binary, 89 bytes):**
-
-```
-Offset   Length   Field
-──────   ──────   ─────
-0        16       LXMF destination hash (derived per Section 3.3)
-16       32       MeshCore Ed25519 public key (raw bytes)
-48       16       Display name (UTF-8, null-padded)
-64       4        Last seen (Unix timestamp, uint32 big-endian)
-68       8        Region tag (ASCII, null-padded, e.g. "UK-WAL\0\0")
-76       1        Opt-in flags:
-                    bit 0: position shared
-                    bit 1: telemetry shared
-77       4        Latitude (int32, microdegrees, 0 if not opted in)
-81       4        Longitude (int32, microdegrees, 0 if not opted in)
-85       4        Position quantisation radius in metres (uint32)
-                    Minimum 3000 (3 km) for publicly shared manifests
-```
-
-**Position quantisation:** If bit 0 of opt-in flags is set, snap lat/lon to nearest grid point at the declared quantisation radius before including in the manifest. A node at 51.481583°N, 3.179090°W with 3000 m quantisation would appear as approximately 51.468°N, 3.158°W — enough to indicate region, not enough to locate an individual.
-
-**Manifest publication:** Serve on request only. Never push. Update the local manifest when:
-- A new local MeshCore node is heard on the 868 MHz mesh
-- An existing node's last-seen timestamp advances by more than 10 minutes
-- A node has not been heard for 24 hours (remove from manifest)
-
-**Manifest signing:** Sign the full serialised manifest with the bridge's Curve25519 private key (using Reticulum's standard signing primitive) before serving. Remote bridges verify the signature against the bridge's known public key.
-
-**Unknown node handling:** A node reachable through this bridge but absent from the manifest (e.g., newly joined, not yet heard) is represented to remote bridges as `[unknown:XXXX]` where XXXX is the first 4 hex characters of its derived LXMF destination hash. This is the expected state; it resolves at the next manifest refresh.
+RTNode-2400 on XIAO ESP32-S3 uses `default_16MB.csv` partition table. Flash usage in boundary build is 27% (1.77 MB of 6.55 MB). Approximately 4.8 MB remains. LittleFS manifest storage of 64 × 90 bytes = 5,760 bytes is negligible. No partition changes required.
 
 ---
 
-## 6. Protocol Boundary Table
+## 7. RTNode-2400 Interface Modes — Unchanged
 
-| Traffic type | 868 MHz RF | UART MCU1↔MCU2 | 2.4 GHz RF |
-|---|---|---|---|
-| Local DM (both nodes local) | ✓ direct | ✗ | ✗ |
-| Local→Remote DM | Received by MCU1 | → MCU2 as type 0x01 | LXMF outbound |
-| Remote→Local DM | Delivered to dest, hop=0 | ← MCU2 as type 0x02 | LXMF inbound |
-| Node advertisements | Local only | ✗ never | ✗ never |
-| Position data | Local only | ✗ unless opt-in | Manifest only, quantised |
-| Transit backbone traffic | ✗ never | ✗ never | RAM fast-path |
-| Manifest queries | ✗ never | type 0x05 for local data | Served by MCU2 |
-| Bridge gateway contact | Single advert on boot | type 0x03 registration | ✗ |
-| Telemetry | Local only | ✗ | ✗ |
+RTNode-2400's existing interface mode logic already implements the flood mitigation the bridge requires:
+
+| Interface | Mode | Effect |
+|---|---|---|
+| SX1262 LoRa (MCU2) | `MODE_ACCESS_POINT` | Blocks backbone announces from crossing to RF |
+| TCP backbone | `MODE_BOUNDARY` | Selective caching; backbone paths evicted first |
+| UART shim (new) | `MODE_ACCESS_POINT` | Blocks backbone announces from crossing to MeshCore side |
+
+The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces do not propagate to MCU 1 and from there onto the 868 MHz MeshCore mesh. This is the Reticulum-layer enforcement of the "no advert propagation" principle; MCU 1's hop-count-zero ingress is the MeshCore-layer enforcement.
 
 ---
 
-## 7. Failure Modes and Degradation
+## 8. Protocol Boundary Table
+
+| Traffic type | 868 MHz RF | MCU1 bridge layer | UART | MCU2 UART shim | WiFi/backbone |
+|---|---|---|---|---|---|
+| Local→Local DM | ✓ direct | Passes through | ✗ | ✗ | ✗ |
+| Local→Remote DM | Received by MCU1 | Intercepts | type 0x01 → | LXMF outbound | TCP |
+| Remote→Local DM | Delivered, hop=0 | Delivers | ← type 0x02 | LXMF inbound | TCP |
+| Node advertisements | Local only | ✗ never | ✗ never | ✗ never | ✗ never |
+| Position data | Local only | ✗ unless opt-in | type 0x05 manifest | Flash storage | Manifest on request |
+| Backbone Reticulum announces | ✗ blocked | ✗ | ✗ | MODE_AP blocks | Received only |
+| Bridge gateway contact | Single advert | Registers after 0x04 | type 0x03/0x04 | Hash served | ✗ |
+| Manifest queries | ✗ never | ✗ | ✗ | Serves on request | TCP |
+
+---
+
+## 9. Failure Modes
 
 | Failure | Local mesh behaviour | Bridge behaviour |
 |---|---|---|
-| MCU 2 power loss | Unaffected | Gateway contact goes stale after MeshCore timeout |
-| 2.4 GHz backbone unreachable | Unaffected | Flash buffer fills; drip resumes when backbone recovers |
-| Flash full | Unaffected | Oldest undelivered packets overwritten (circular FIFO) |
-| UART CRC errors > 5% over 60s | MCU1 logs error | MCU2 backs off to 50% drip rate |
-| Gateway contact stale (>4h no advert refresh) | Local nodes stop routing to gateway | Expected — bridge should re-advert on 4h interval |
-
-The bridge should re-transmit its gateway contact advertisement every 4 hours, matching MeshCore repeater advert interval.
+| MCU 2 power loss | Unaffected | Gateway contact goes stale after MeshCore 4h timeout |
+| WiFi backbone unreachable | Unaffected | MCU 2 buffers outbound; retries with exponential backoff (RTNode-2400 built-in) |
+| UART CRC errors >5% over 60s | Unaffected | MCU 1 logs, backs off drip rate; MCU 2 continues normally |
+| Gateway contact stale | Local nodes stop routing to bridge | MCU 1 re-advertises every 4h |
+| MCU 1 power loss | Local mesh unaffected | MCU 2 continues as RTNode; no MeshCore traffic |
+| Manifest stale (MCU 2 reboots) | Unaffected | MCU 1 replays all known nodes via type 0x05 on next boot |
 
 ---
 
-## 8. Implementation Path
+## 10. Implementation Path
 
-### Phase 1 — Hardware and framing
-- UART link with length-prefixed framing, CRC-16/CCITT
-- RTS/CTS flow control verified under sustained load
-- SPI bus arbitration under interrupt (SX1280 pre-empts flash)
-- Both MCUs boot and exchange type 0x06 heartbeat frames
+### Phase 1 — Hardware bring-up
+- Flash RTNode-2400 `seeed_xiao_esp32s3_boundary` to MCU 2
+- Configure WiFi and backbone via captive portal
+- Verify MCU 2 connects to backbone and announces on Reticulum
+- UART link with framing and CRC-16/CCITT verified between MCUs
+- Type 0x03/0x04 LXMF hash handshake working
 
-### Phase 2 — Local mesh integration
-- MCU 2 generates and persists Curve25519 identity
+### Phase 2 — Gateway contact
 - MCU 1 registers single gateway contact on 868 MHz mesh
-- Inbound delivery with hop count 0 verified on local mesh
-- Outbound packets from local nodes reach MCU 2
+- Verified: local MeshCore nodes can see and address the gateway
+- Verified: hop count is 1, link quality is not spoofed
 
-### Phase 3 — Flash buffer
-- Flash FIFO with packed record format
-- Metadata RAM buffering with 60s flush
-- Drip delivery respecting CTS
-- Fast-path transit in RAM verified end-to-end
+### Phase 3 — Outbound path (local → backbone)
+- MCU 1 intercepts packets to gateway, sends type 0x01 to MCU 2
+- MCU 2 UART shim receives, derives LXMF destination, sends via Reticulum
+- Verify delivery at a remote Reticulum node
 
-### Phase 4 — Backbone
-- Reticulum stack on SX1280 via RadioLib
-- LXMF message send and receive
-- HKDF destination mapping for local MeshCore nodes
-- End-to-end DM from local node to remote node via two bridges
+### Phase 4 — Inbound path (backbone → local)
+- MCU 2 receives LXMF message for local MeshCore node
+- UART shim sends type 0x02 to MCU 1
+- MCU 1 delivers to local node with hop count 0
+- Verify: packet not re-flooded
 
-### Phase 5 — Manifest and discovery
-- Contact manifest publication and signing
-- Remote manifest fetch and contact list population in MCU 1
-- Position opt-in flag handling and quantisation
-- Unknown node display name fallback
+### Phase 5 — Manifest
+- MCU 1 pushes type 0x05 manifest entries on node discovery
+- MCU 2 stores in LittleFS and serves as LXMF resource
+- Remote bridge fetches manifest and resolves display names
+- Position opt-in and quantisation (min 3 km radius)
 
 ### Phase 6 — Hardening
-- Seen-message cache (64-entry LRU, keyed on LXMF message hash)
-- Rate limiting: max 10 inbound deliveries per local node per minute
-- Operator LED indicators: backbone link, local mesh activity, buffer depth
-- Metadata wear-levelling across 8 sectors (Phase 6, not Phase 1)
+- Seen-message cache on MCU 2: 64-entry LRU keyed on LXMF message hash (SHA-256 of source_hash + destination_hash + timestamp + payload_hash)
+- Rate limiting: max 10 inbound deliveries per local node per minute at MCU 1
+- MCU 1 LED: gateway contact registered (solid), backbone active (blink), error (fast blink)
+- HKDF salt published as protocol constant in project repository
 
 ---
 
-## 9. Open Questions
+## 11. Open Questions
 
-These are genuinely open — not deferred design decisions.
+1. **MeshCore companion protocol packet interception.** The companion protocol used by MCU 1 to interface with the MeshCore stack is not formally versioned. The bridge companion layer intercepts packets at this layer. What is the stability guarantee across MeshCore firmware updates? Version negotiation or a stability commitment is needed before this can be deployed at scale.
 
-1. **MeshCore companion protocol stability.** The companion protocol (USB/BLE/serial) packet format is not formally versioned. What guarantees exist that MCU 1's packet interception remains valid across MeshCore firmware updates? A formal stability commitment or version negotiation handshake is needed.
+2. **UART shim integration point in RTNode-2400.** The shim needs to inject packets into the microReticulum send pipeline on MCU 2. The cleanest integration point is as a new `InterfaceImpl` alongside `TcpInterface`. Confirm this is feasible within microReticulum 0.2.4's interface abstraction before starting Phase 3.
 
-2. **Reticulum on nRF52840 RAM budget.** The nRF52840 has 256 KB RAM. A minimal Reticulum stack with LXMF, one active link, and the flash FIFO drip logic needs characterisation. Has anyone measured Reticulum RAM usage on this MCU? If it exceeds ~180 KB there is no headroom for the TX queue.
+3. **HKDF salt publication.** The salt value must be computed, published, and frozen as a protocol constant before any two independent bridge implementations attempt to interoperate. This is a coordination task, not a technical one, but it blocks interoperability.
 
-3. **SX1280 LoRa and 2.4 GHz Wi-Fi coexistence in practice.** The channel plan in Section 1.2 is based on Wi-Fi channel centre frequencies and typical 20 MHz channel width. Real deployments use 40 MHz and 80 MHz channels (Wi-Fi 5/6). A site survey tool or empirical interference measurement is needed before finalising the channel plan.
-
-4. **Multi-bridge mesh topology.** This spec describes a single bridge node. When multiple bridges exist in a region, do their backbone Reticulum instances form a mesh automatically via Reticulum's transport routing, or does each bridge need explicit peering configuration? The answer affects the Phase 4 implementation significantly.
+4. **Manifest query protocol.** The spec states manifests are served as LXMF resources at `meshcore.bridge.manifest` on request. The request packet format, response format for multi-entry manifests (stream of 90-byte records vs length-prefixed list), and pagination for large manifests are not yet defined. This must be specified before Phase 5.
