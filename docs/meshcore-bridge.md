@@ -5,7 +5,7 @@
 **Companion document:** [LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging](https://github.com/artbotterell/CoreNet) (Botterell, KD6O)  
 **Upstream firmware base:** [RTNode-2400](https://github.com/GrayHatGuy/RTNode-2400) (GrayHatGuy / jrl290), microReticulum (attermann), RNode Firmware (markqvist)  
 **WIP hardware reference:** [awesome-meshcore open hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)  
-**Author** A word guessing machine with input from samuk
+**Author** Word guessing machine with input from samuk
 **License:** GPL-3.0 (inherited)
 
 ---
@@ -21,6 +21,8 @@ This specification describes a dual-MCU MeshCore–Reticulum bridge node consist
 [RTNode-2400](https://github.com/GrayHatGuy/RTNode-2400) provides a working, tested microReticulum boundary node implementation on ESP32-S3 with empirically measured RAM usage of ~29% (94 KB of 327 KB) in boundary mode. This eliminates the need to implement Reticulum from scratch and is the primary architectural change from v2. The CoreNet project ([github.com/artbotterell/CoreNet](https://github.com/artbotterell/CoreNet)) defines the LXMF interoperability plane this bridge implements. WIP carrier hardware is tracked at [awesome-meshcore open hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md).
 
 The bridge logic is split across both MCUs according to ownership. On MCU 2 we own RTNode-2400 and develop it directly: the UART interface, LXMF identity mapping, manifest storage, SPI flash driver, and any expansions to the path/announce tables are all first-party RTNode-2400 features. On MCU 1 we do not modify MeshCore; the bridge companion layer operates exclusively within the interface that MeshCore's companion protocol exposes, without touching the core routing stack.
+
+**Relationship to CoreNet architecture:** CoreNet describes a Bridge Daemon running on an always-on host (Pi, server, VM) that connects to a companion radio over serial/BLE/TCP. This node is an embedded implementation of that same pattern: MCU 1 is the companion radio, MCU 2 running RTNode-2400 is the bridge daemon, and the UART link between them replaces the host serial/BLE/TCP connection. The CoreNet safety invariants — no advert propagation, zero-hop ingress, one gateway contact, pull-based manifests, position opt-in — are all implemented here at the MCU layer rather than in software on a host.
 
 **The governing constraint throughout:** the local 868 MHz mesh behaves identically whether or not the bridge is present. The bridge is invisible to local nodes except as a single gateway contact. The mesh works when the bridge is down.
 
@@ -144,7 +146,7 @@ If LEN > 512, emit error frame type 0xFF with error code 0x03 and return to WAIT
 | 0x02 | 32 + N bytes | 32-byte dest pubkey + decrypted payload (N ≤ 480) |
 | 0x03 | 0 bytes | Hash request carries no payload |
 | 0x04 | 16 bytes | LXMF destination hash |
-| 0x05 | 90 bytes | Manifest entry (fixed, see §5.4) |
+| 0x05 | 106 bytes | Manifest entry (fixed, see §5.4) |
 | 0x06 | 1 byte | Echo of acknowledged packet type |
 | 0xFF | 1 byte | Error code |
 
@@ -206,7 +208,11 @@ MCU 1 uses this hash as the `lxmf_hash` field in the gateway contact it register
 
 Each MeshCore node reachable through this bridge needs a stable LXMF destination hash, derived deterministically from its MeshCore Ed25519 public key. This derivation is performed **once** when a manifest entry is received (type 0x05 on MCU 2, or on first hearing a node on MCU 1), and the result is stored in the SPI flash manifest as a precomputed lookup table entry. It is never recomputed at packet delivery time — inbound LXMF delivery is an O(1) manifest lookup, not a per-packet HKDF operation.
 
-**Derivation (performed once per node, at manifest entry time):**
+**⚠ INTEROPERABILITY CONFLICT — SEE OPEN QUESTION 1 BEFORE IMPLEMENTING ⚠**
+
+CoreNet specifies that LXMF destination hashes should be derived via **standard Ed25519→Curve25519 conversion** (the same method Reticulum itself uses), with HKDF as a fallback only where the scalar is inaccessible. This implementation uses HKDF because the nRF52840 nrf_crypto API does not expose the Ed25519 scalar. If any other bridge implementation uses direct Ed25519→Curve25519 conversion (as CoreNet prefers), the derived destination hashes will be different and cross-bridge delivery will silently fail. This must be resolved with the CoreNet authors before first deployment. The derivation method must be the same across all bridge implementations.
+
+**Current implementation (HKDF fallback — subject to change pending resolution of open question 1):**
 
 ```
 Inputs:
@@ -219,7 +225,7 @@ Result:
   lxmf_dest_hash = HKDF-SHA256(IKM, Salt, Info, 16)   (16 bytes, stored directly)
 ```
 
-HKDF-SHA256 with L=16 produces the destination hash directly. The ESP32-S3 hardware SHA accelerator makes this fast, but it is still called only once per node, not per packet.
+HKDF-SHA256 with L=16 produces the destination hash directly. It is called only once per node, not per packet.
 
 **Salt value — protocol constant, hardcoded in both MCUs:**
 
@@ -235,10 +241,7 @@ static const uint8_t LXMF_BRIDGE_SALT[32] = {
 };
 ```
 
-This constant must be computed, verified by at least two independent implementations, published in the project repository, and treated as immutable thereafter. Any change to the salt invalidates all previously derived LXMF destination hashes and breaks interoperability with deployed bridges.
-
-**Why HKDF rather than direct Ed25519→Curve25519 conversion:**  
-Direct conversion is mathematically possible but requires explicit access to the Ed25519 scalar, which is not exposed by the nRF52840 Mbed TLS / nrf_crypto API. HKDF from the public key is implementable with standard primitives on both MCUs and produces a stable, one-way mapping.
+This constant is only relevant if HKDF is confirmed as the canonical interop method (open question 1). If direct Ed25519→Curve25519 conversion is adopted, this constant is not used. Do not publish or freeze this constant until open question 1 is resolved.
 
 **Reverse mapping** (LXMF destination hash → MeshCore pubkey and display name) is stored as a flat lookup table in the SPI flash manifest. On MCU 2, inbound LXMF delivery scans this table by lxmf_dest_hash. A node not present in the manifest cannot be delivered to — see open question 8.
 
@@ -319,18 +322,21 @@ Note: `pubkey_prefix` in the companion protocol is only 6 bytes. The bridge laye
 When the companion firmware notifies the bridge layer of a newly heard or updated node via `PUSH_CODE_ADVERT` (0x80) or `PUSH_CODE_NEW_ADVERT` (0x8A), the bridge layer fetches the full contact record via `CMD_GET_CONTACTS` (0x04) and pushes a type 0x05 manifest entry to MCU 2:
 
 ```
-Type 0x05 payload (90 bytes):
-  Byte 0:      Version = 0x01
-  Bytes 1–32:  MeshCore Ed25519 public key (raw)
-  Bytes 33–48: LXMF destination hash (derived per Section 4.2)
-  Bytes 49–64: Display name (UTF-8, null-padded to 16 bytes)
-  Bytes 65–68: Last seen Unix timestamp (uint32 big-endian)
-  Bytes 69–76: Region tag (ASCII, null-padded, e.g. "UK-WAL\0\0")
-  Byte  77:    Opt-in flags (bit 0: position shared)
-  Bytes 78–81: Latitude (int32 microdegrees, 0 if not opted in)
-  Bytes 82–85: Longitude (int32 microdegrees, 0 if not opted in)
-  Bytes 86–89: Position quantisation radius in metres (uint32, min 3000)
+Type 0x05 payload (106 bytes):
+  Byte 0:       Version = 0x01
+  Bytes 1–32:   MeshCore Ed25519 public key (raw)
+  Bytes 33–48:  LXMF destination hash (derived per Section 4.2)
+  Bytes 49–80:  Display name (UTF-8, null-padded to 32 bytes)  ← CoreNet: up to 32 bytes
+  Bytes 81–84:  Last seen Unix timestamp (uint32 big-endian)
+  Bytes 85–92:  Region tag (ASCII, null-padded to 8 bytes, e.g. "UK-WAL\0\0")
+  Byte  93:     Propagation scope (0x00 = local, 0x01 = region, 0x02 = global; default 0x01)
+  Byte  94:     Opt-in flags (bit 0: position shared)
+  Bytes 95–98:  Latitude (int32 microdegrees, 0 if not opted in)
+  Bytes 99–102: Longitude (int32 microdegrees, 0 if not opted in)
+  Bytes 103–106: Position quantisation radius in metres (uint32, min 3000)
 ```
+
+**Propagation scope** defaults to `0x01` (region). A bridge with scope `region` only interoperates with remote bridges whose region tag matches its own. Scope `global` opts into unrestricted interoperability. Scope `local` disables all WAN forwarding for this node's traffic regardless of other settings. This implements CoreNet's region-scoping requirement. A node that has never explicitly set scope is treated as `region` — consistent with CoreNet's "safe by default" principle.
 
 MCU 2 stores these entries and serves them as the contact manifest when queried by remote bridges. MCU 1 sends a manifest entry:
 - When a new node is first heard
@@ -338,6 +344,29 @@ MCU 2 stores these entries and serves them as the contact manifest when queried 
 - On bridge boot (replay all known local nodes to resync MCU 2)
 
 MCU 1 removes a node from its local manifest and sends an update with last_seen = 0 when a node has not been heard for 24 hours.
+
+### 5.5 Admin Command Filtering
+
+CoreNet explicitly prohibits bridging of admin, radio configuration, and raw RF commands. The bridge layer on MCU 1 must not forward the following companion protocol commands received via any path to the MeshCore radio, and must not expose them to MCU 2 via the UART link:
+
+| Command | Code | Reason blocked |
+|---|---|---|
+| `CMD_SET_RADIO_PARAMS` | 0x0B | Radio configuration is local only |
+| `CMD_SET_RADIO_TX_POWER` | 0x0C | Radio configuration is local only |
+| `CMD_SEND_LOGIN` | 0x1A | Admin access to repeaters/room servers must not be remotely initiated |
+| `CMD_FACTORY_RESET` | 0x33 | Destructive; must never be remotely triggerable |
+| `CMD_SET_DEVICE_PIN` | 0x25 | Security credential; local only |
+| `CMD_EXPORT_PRIVATE_KEY` | 0x17 | Key material; must never traverse any network path |
+
+Any type 0x01 UART frame arriving from MCU 2 whose embedded payload matches any of these command codes after LXMF decapsulation must be silently dropped and logged. MCU 2 does not forward these; this is a defence-in-depth check on MCU 1.
+
+### 5.6 ACK Synthesis
+
+CoreNet specifies that ACKs are "synthesised from LXMF delivery receipts." When MCU 2 receives a delivery confirmation from the Reticulum layer for an outbound LXMF message, it sends a type 0x06 ACK frame to MCU 1. MCU 1 then sends `CMD_SEND_SELF_ADVERT` is not the right mechanism — instead MCU 1 must synthesise a MeshCore ACK back to the original sender.
+
+**Current gap:** the MeshCore companion protocol does not expose a command to inject a synthetic ACK for a previously sent message. `PUSH_CODE_SEND_CONFIRMED` (0x82) is a push notification from the radio to the app, not a command from the app to the radio. There is no `CMD_SEND_ACK` command in the current protocol.
+
+Until this is available upstream, delivery confirmation to the local sender is not possible. The bridge operates on best-effort semantics: the local node sends to the gateway contact and receives no delivery confirmation. This is the same behaviour as sending to an out-of-range direct contact. Document this limitation clearly in any user-facing bridge documentation.
 
 ---
 
@@ -374,9 +403,9 @@ This hash is stable across reboots (RTNode-2400 persists its Reticulum identity 
 
 ### 6.3 Manifest Storage and Service
 
-MCU 2 stores manifest entries received via type 0x05 frames on the external SPI flash (see §6.4). It serves these as an LXMF resource at destination aspect `meshcore.bridge.manifest` when queried by remote bridges.
+MCU 2 stores manifest entries received via type 0x05 frames on the external SPI flash (see §6.4). It serves these as an LXMF resource at the CoreNet-defined destination aspect `meshcore` / `bridge` when queried by remote bridges. The full destination naming follows CoreNet's scheme: application `"meshcore"`, aspect `"bridge"` for manifest queries, aspect `"node"` for individual node destinations.
 
-**Manifest entry format on disk:** identical to the type 0x05 payload (90 bytes per entry), stored as a flat array. The 8 MB SPI flash supports far more than the minimum 64-entry (5,760 byte) working set — the practical limit is the local mesh size, not storage. The implementation should nevertheless enforce a configurable cap (default 512 entries, 46,080 bytes) to bound manifest query response time.
+**Manifest entry format on disk:** identical to the type 0x05 payload (106 bytes per entry), stored as a flat array. The 8 MB SPI flash supports far more than needed — the practical limit is the local mesh size, not storage. The implementation should nevertheless enforce a configurable cap (default 512 entries, ~54 KB) to bound manifest query response time.
 
 **Manifest signing:** MCU 2 signs the serialised manifest with its Reticulum identity private key before serving. Remote bridges verify the signature against the bridge's known public key (obtainable from the Reticulum announce).
 
@@ -390,7 +419,7 @@ The carrier board provides 8 MB of SPI flash accessible to the ESP32-S3 via SPI.
 
 | Region | Size | Contents |
 |---|---|---|
-| Manifest store | 1 MB | Contact manifest + LXMF→pubkey lookup table (90 bytes × up to 11,650 entries) |
+| Manifest store | 1 MB | Contact manifest + LXMF→pubkey lookup table (106 bytes × up to 9,930 entries) |
 | Inbound delivery queue | 6 MB | Per-destination packet queue for 868 MHz rate limiting — see §6.5 |
 | Reserved | 1 MB | Future use |
 
@@ -514,20 +543,28 @@ The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum annou
 
 ## 11. Open Questions
 
-1. **Companion firmware serial interface — confirmed viable.** The MeshCore companion firmware exposes a fully documented binary frame protocol over USB serial (protocol version 8). All three required capabilities are available: (a) `CMD_ADD_UPDATE_CONTACT` (0x09) registers contacts programmatically; (b) `CMD_SEND_RAW_DATA` (0x19) with `path_len = 0` delivers packets direct/zero-hop without re-flooding; (c) the bridge layer IS the companion app — outbound traffic is received via `PUSH_CODE_MSG_WAITING` (0x83) push, not intercepted. The nRF52840 on XIAO supports the companion firmware. This question is resolved: use companion firmware, not repeater firmware.
+1. **LXMF destination derivation method — critical interoperability conflict with CoreNet.** CoreNet specifies that LXMF destination hashes should be derived via standard Ed25519→Curve25519 conversion (Reticulum's own method), with HKDF as a fallback only where the scalar is inaccessible. This implementation uses HKDF because the nRF52840 nrf_crypto API does not expose the Ed25519 scalar. If another bridge implementation uses direct conversion and this one uses HKDF, derived hashes will differ and cross-bridge delivery will silently fail. Three paths exist: (a) confirm with CoreNet authors that HKDF is an acceptable canonical method for constrained MCU implementations and document it as such; (b) investigate whether the nRF52840 can perform Ed25519→Curve25519 via a lower-level API or by building against a different crypto library (libsodium, TweetNaCl); (c) move destination derivation entirely to MCU 2 (ESP32-S3), which has no such constraint. This is the highest-priority open question and blocks all interoperability testing.
 
 2. **UART interface integration point in microReticulum.** Since we own RTNode-2400, the integration point is a design decision, not a feasibility question. The cleanest approach is implementing the UART interface as a new `InterfaceImpl` alongside the existing SX1280 interface within microReticulum's abstraction layer. This design should be documented and reviewed before starting Phase 3 implementation.
 
-3. **HKDF salt publication.** The salt value must be computed, published, and frozen as a protocol constant before any two independent bridge implementations attempt to interoperate. This is a coordination task, not a technical one, but it blocks interoperability.
+3. **HKDF salt publication.** The salt value in §4.2 must be computed and published only after open question 1 is resolved — if direct Ed25519→Curve25519 conversion is adopted, the salt is not needed. If HKDF is confirmed canonical, the salt must be frozen and published before any interoperability testing.
 
-4. **Manifest query protocol.** The spec states manifests are served as LXMF resources at `meshcore.bridge.manifest` on request. The request packet format, response format for multi-entry manifests (stream of 90-byte records vs length-prefixed list), and pagination for large manifests are not yet defined. This must be specified before Phase 5.
+4. **Manifest query protocol.** The spec states manifests are served as LXMF resources at CoreNet destination `meshcore` / `bridge` on request. The request packet format, response format for multi-entry manifests (stream of 106-byte records vs length-prefixed list), and pagination for large manifests are not yet defined. This must be specified before Phase 5 and should be coordinated with CoreNet to ensure compatibility with software-daemon bridge implementations.
 
-5. **`contact_type = ADV_TYPE_REPEATER` side effects.** The gateway contact is registered as `ADV_TYPE_REPEATER` (2), the closest available type. MeshCore's routing behaviour toward a REPEATER-typed contact needs to be characterised — specifically whether it affects path selection, flooding scope, or message TTL. A dedicated `ADV_TYPE_BRIDGE` should be proposed upstream. Confirm behaviour before Phase 2 field testing.
+5. **`contact_type = ADV_TYPE_REPEATER` side effects.** The gateway contact is registered as `ADV_TYPE_REPEATER` (2), the closest available type. MeshCore's routing behaviour toward a REPEATER-typed contact needs to be characterised — specifically whether it affects path selection, flooding scope, or message TTL. A dedicated `ADV_TYPE_BRIDGE` should be proposed upstream to CoreNet and MeshCore jointly. Confirm behaviour before Phase 2 field testing.
 
 6. **6-byte pubkey prefix resolution.** `RESP_CODE_CONTACT_MSG_RECV_V3` provides only the first 6 bytes of the sender's public key. The bridge layer resolves the full 32-byte key from the companion contacts list. If two local nodes share the same 6-byte prefix (unlikely but possible), resolution is ambiguous. Document the collision handling policy.
 
-7. **Inbound delivery to unknown local node.** If an LXMF message arrives on MCU 2 addressed to a MeshCore node with no manifest entry, the UART interface returns error 0x02 and the message is silently dropped. Define whether a best-effort retry hold queue should be implemented on MCU 2, or whether silent drop is acceptable.
+7. **ACK synthesis — companion protocol gap.** CoreNet requires ACKs to be synthesised from LXMF delivery receipts. The MeshCore companion protocol has no `CMD_SEND_ACK` command — `PUSH_CODE_SEND_CONFIRMED` is a push notification from radio to app, not the reverse. Until MeshCore adds this capability upstream, confirmed delivery cannot be signalled back to the local sender. This should be raised with the MeshCore core team as a companion protocol extension request, referencing CoreNet's requirement. In the meantime, document the best-effort limitation in user-facing bridge documentation.
 
-8. **SPI flash failure mode.** If the external SPI flash is unreadable at boot, MCU 2 must continue as a functional RTNode-2400 boundary node and notify MCU 1 to suppress manifest pushes. Define the detection and fallback behaviour, and add a type 0xFF error subcode for this condition.
+8. **Inbound delivery to unknown local node.** If an LXMF message arrives on MCU 2 addressed to a MeshCore node with no manifest entry, the UART interface returns error 0x02 and the message is silently dropped. Define whether a best-effort retry hold queue should be implemented on MCU 2, or whether silent drop is acceptable.
 
-9. **Power budget and boot sequencing.** The 3V3 shared rail in §1.3 requires a current budget check — no figures are given. Characterise peak current for ESP32-S3 + SX1280 + SPI flash at boot, confirm the rail can supply both MCUs simultaneously, and validate that the 30-second MCU 1 retry interval is sufficient for MCU 2 boot completion.
+9. **Region scope enforcement.** §5.4 adds a propagation scope byte to the manifest entry (local / region / global, default region). MCU 2 must enforce this at the LXMF routing layer: do not forward outbound messages to remote bridges outside the node's declared scope, and do not accept inbound messages for nodes declared as `local`. The enforcement mechanism in the UART interface and LXMF pipeline needs to be specified before Phase 5.
+
+10. **Channel message bridging.** CoreNet specifies channel messages should be forwarded to bridges subscribed to the same channel secret. This implementation has no channel message support. Channel bridging requires: channel secret → LXMF destination derivation, subscription management, and a new UART frame type. Out of scope for v3 but should be added to the Phase 4 or 5 implementation path for v4.
+
+11. **Privacy notice publication.** CoreNet requires bridges to publish a privacy notice alongside manifests stating retention, precision, and sharing policy. The format and delivery mechanism for an embedded node publishing a machine-readable privacy notice over LXMF is not defined. Coordinate with CoreNet on a minimal notice schema suitable for constrained devices.
+
+12. **SPI flash failure mode.** If the external SPI flash is unreadable at boot, MCU 2 must continue as a functional RTNode-2400 boundary node and notify MCU 1 to suppress manifest pushes. Define the detection and fallback behaviour, and add a type 0xFF error subcode for this condition.
+
+13. **Power budget and boot sequencing.** The 3V3 shared rail in §1.3 requires a current budget check — no figures are given. Characterise peak current for ESP32-S3 + SX1280 + SPI flash at boot, confirm the rail can supply both MCUs simultaneously, and validate that the 30-second MCU 1 retry interval is sufficient for MCU 2 boot completion.
