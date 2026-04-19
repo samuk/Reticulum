@@ -2,7 +2,7 @@
 
 **Status:** Draft for community review  
 **Supersedes:** meshcore_bridge_spec_v2.md  
-**Companion document:** LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging (Botterell, KD6O)  
+**Companion document:** [LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging (Botterell, KD6O)](https://github.com/artbotterell/CoreNet) 
 **Upstream firmware base:** RTNode-2400 (GrayHatGuy / jrl290), microReticulum (attermann), RNode Firmware (markqvist)  
 **License:** GPL-3.0 (inherited)
 
@@ -13,7 +13,7 @@
 This specification describes a dual-MCU MeshCore–Reticulum bridge node consisting of:
 
 - **MCU 1 (MeshCore side):** Seeed XIAO nRF52840 + Wio SX1262, running MeshCore firmware with a bridge companion layer
-- **MCU 2 (Reticulum side):** Seeed XIAO ESP32-S3 + Wio SX1262, running RTNode-2400 (microReticulum boundary node)
+- **MCU 2 (Reticulum side):** Seeed XIAO ESP32-S3 + Wio SX1280, running RTNode-2400 (microReticulum boundary node)
 - **Interconnect:** UART with RTS/CTS hardware flow control
 
 RTNode-2400 provides a working, tested microReticulum boundary node implementation on ESP32-S3 with empirically measured RAM usage of ~29% (94 KB of 327 KB) in boundary mode. This eliminates the need to implement Reticulum from scratch and is the primary architectural change from v2.
@@ -25,6 +25,7 @@ The MeshCore bridge logic — gateway contact registration, LXMF identity mappin
 ---
 
 ## 1. Hardware
+[WIP hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)
 
 ### 1.1 Bill of Materials
 
@@ -33,19 +34,18 @@ The MeshCore bridge logic — gateway contact registration, LXMF identity mappin
 | MCU 1 | Seeed XIAO nRF52840 | MeshCore host, bridge companion layer |
 | MCU 1 radio | Seeed Wio SX1262 shield | 868 MHz MeshCore last-mile |
 | MCU 2 | Seeed XIAO ESP32-S3 (8 MB PSRAM variant) | RTNode-2400 / microReticulum |
-| MCU 2 radio | Seeed Wio SX1262 shield | RNode interface to Reticulum backbone |
-| Backbone transport | WiFi (built into ESP32-S3) | TCP connection to Reticulum backbone |
+| MCU 2 radio | Seeed Wio SX1280 shield | 2.4 GHz RNode interface to Reticulum backbone |
 | Interconnect | UART + RTS/CTS | MCU 1 ↔ MCU 2 bridge link |
 
-**Note on MCU 2 radio:** RTNode-2400 on XIAO ESP32-S3 currently supports SX1262 (confirmed working, boundary mode verified per upstream README). The backbone transport is WiFi TCP to an rnsd instance or rmap.world — not a second LoRa radio. A second SX1262 on MCU 2 provides the RNode interface that RTNode-2400 uses for its LoRa interface in `MODE_ACCESS_POINT`. This is optional if WiFi-only backbone is sufficient; include it if RF backbone hops are needed.
+**Note on MCU 2 radio:** RTNode-2400 on XIAO ESP32-S3 uses the SX1280 operating at 2.4 GHz as its sole backbone interface (confirmed working, boundary mode verified per upstream README — the "2400" in RTNode-2400 refers to this band). WiFi is not used; all Reticulum backbone connectivity is carried over the SX1280 LoRa link. The SX1280 operates in `MODE_ACCESS_POINT` within RTNode-2400's interface abstraction. MCU 1's SX1262 operates at 868 MHz and has no RF conflict with the SX1280 on MCU 2.
 
 **Note on PSRAM:** The XIAO ESP32-S3 Plus Sense board has 8 MB PSRAM. RTNode-2400 boundary mode uses TLSF allocation from PSRAM when available. Use the PSRAM variant; the non-PSRAM variant has been confirmed to fall back to ~170 KB internal SRAM which is tighter.
 
 ### 1.2 Backbone Transport
 
-MCU 2 connects to the Reticulum backbone via WiFi TCP using RTNode-2400's existing boundary mode. The backbone host is configurable via RTNode-2400's captive portal (SSID, password, backbone host:port). No additional backbone radio hardware is required for a WiFi-connected deployment.
+MCU 2 connects to the Reticulum backbone exclusively via the SX1280 LoRa radio link. There is no WiFi or TCP backbone interface in this configuration. RTNode-2400 operates with a single SX1280 interface in `MODE_ACCESS_POINT`, forwarding unroutable packets to adjacent Reticulum nodes over RF. The backbone channel, spreading factor, and uplink peer are configured in RTNode-2400's interface settings.
 
-**WiFi channel coexistence note:** The XIAO ESP32-S3 WiFi operates at 2.4 GHz. Both MCU 1 and MCU 2 carry SX1262 radios on the Wio shield at 868 MHz. There is no RF conflict between the 2.4 GHz WiFi and the 868 MHz LoRa radios.
+**RF link budget note:** The SX1280 at 2.4 GHz has a shorter free-space range than sub-GHz LoRa at equivalent transmit power. Ensure the backbone RF uplink to the nearest Reticulum node is link-budgeted for the deployment site. This is the primary range constraint on the backbone side; the local 868 MHz MeshCore mesh is unaffected.
 
 ### 1.3 Interconnect Wiring
 
@@ -76,11 +76,10 @@ MCU 2 halts UART output immediately on CTS HIGH. MCU 2 must buffer at least 2 pa
 
 MCU 2 runs RTNode-2400 `seeed_xiao_esp32s3_boundary` build without modification. It operates as a standard Reticulum boundary transport node:
 
-- LoRa interface in `MODE_ACCESS_POINT`: blocks backbone announces from crossing to RF
-- TCP backbone interface in `MODE_BOUNDARY`: selective caching, backbone paths evicted first
+- SX1280 LoRa interface in `MODE_ACCESS_POINT`: sole backbone interface; blocks backbone announces from propagating back to RF
 - Path table capped at 48 entries; hash list at 32; announce queue at 4
 - Backbone announces cached to flash, served on demand when local nodes request paths
-- Default route forwarding: unroutable packets from LoRa forwarded to backbone
+- Default route forwarding: unroutable packets forwarded to backbone over SX1280
 
 The only addition required on MCU 2 is **UART serial input/output** handling to forward LXMF-encapsulated MeshCore packets between the UART link and the Reticulum stack. This is a new serial interface type, not a modification to existing interfaces. It can be implemented as a thin shim that reads framed packets from UART and injects them into the microReticulum packet pipeline, and vice versa.
 
@@ -96,7 +95,7 @@ Headroom is comfortable. The UART shim adds negligible RAM overhead.
 
 ### 2.2 MCU 1 — MeshCore + Bridge Companion Layer
 
-MCU 1 runs MeshCore firmware (companion or repeater role as appropriate) with an additional bridge companion layer that intercepts relevant packets and manages the UART link to MCU 2. This layer does not modify MeshCore's core routing behaviour.
+MCU 1 runs MeshCore firmware  with an additional bridge companion layer that intercepts relevant packets and manages the UART link to MCU 2. This layer does not modify MeshCore's core routing behaviour.
 
 The bridge companion layer responsibilities:
 - On boot: register one gateway contact on the local MeshCore mesh
@@ -302,7 +301,7 @@ RTNode-2400 runs unmodified except for one addition: a UART serial interface shi
 
 ### 6.1 What the Shim Does
 
-The shim is a new interface type alongside the existing LoRa and TCP interfaces. It:
+The shim is a new interface type alongside the existing SX1280 LoRa and TCP interfaces. It:
 
 1. Reads framed packets from UART (type 0x01 from MCU 1)
 2. Unpacks source/destination MeshCore pubkeys and payload
@@ -347,8 +346,7 @@ RTNode-2400's existing interface mode logic already implements the flood mitigat
 
 | Interface | Mode | Effect |
 |---|---|---|
-| SX1262 LoRa (MCU2) | `MODE_ACCESS_POINT` | Blocks backbone announces from crossing to RF |
-| TCP backbone | `MODE_BOUNDARY` | Selective caching; backbone paths evicted first |
+| SX1280 LoRa (MCU2) | `MODE_ACCESS_POINT` | Sole backbone interface; blocks backbone announces from re-propagating to RF |
 | UART shim (new) | `MODE_ACCESS_POINT` | Blocks backbone announces from crossing to MeshCore side |
 
 The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces do not propagate to MCU 1 and from there onto the 868 MHz MeshCore mesh. This is the Reticulum-layer enforcement of the "no advert propagation" principle; MCU 1's hop-count-zero ingress is the MeshCore-layer enforcement.
@@ -357,16 +355,16 @@ The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces 
 
 ## 8. Protocol Boundary Table
 
-| Traffic type | 868 MHz RF | MCU1 bridge layer | UART | MCU2 UART shim | WiFi/backbone |
+| Traffic type | 868 MHz RF | MCU1 bridge layer | UART | MCU2 UART shim | SX1280 backbone |
 |---|---|---|---|---|---|
 | Local→Local DM | ✓ direct | Passes through | ✗ | ✗ | ✗ |
-| Local→Remote DM | Received by MCU1 | Intercepts | type 0x01 → | LXMF outbound | TCP |
-| Remote→Local DM | Delivered, hop=0 | Delivers | ← type 0x02 | LXMF inbound | TCP |
+| Local→Remote DM | Received by MCU1 | Intercepts | type 0x01 → | LXMF outbound | RF |
+| Remote→Local DM | Delivered, hop=0 | Delivers | ← type 0x02 | LXMF inbound | RF |
 | Node advertisements | Local only | ✗ never | ✗ never | ✗ never | ✗ never |
 | Position data | Local only | ✗ unless opt-in | type 0x05 manifest | Flash storage | Manifest on request |
 | Backbone Reticulum announces | ✗ blocked | ✗ | ✗ | MODE_AP blocks | Received only |
 | Bridge gateway contact | Single advert | Registers after 0x04 | type 0x03/0x04 | Hash served | ✗ |
-| Manifest queries | ✗ never | ✗ | ✗ | Serves on request | TCP |
+| Manifest queries | ✗ never | ✗ | ✗ | Serves on request | RF |
 
 ---
 
@@ -375,7 +373,7 @@ The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces 
 | Failure | Local mesh behaviour | Bridge behaviour |
 |---|---|---|
 | MCU 2 power loss | Unaffected | Gateway contact goes stale after MeshCore 4h timeout |
-| WiFi backbone unreachable | Unaffected | MCU 2 buffers outbound; retries with exponential backoff (RTNode-2400 built-in) |
+| SX1280 backbone RF link lost | Unaffected | MCU 2 buffers outbound; retries with exponential backoff (RTNode-2400 built-in); no backbone delivery until RF restored |
 | UART CRC errors >5% over 60s | Unaffected | MCU 1 logs, backs off drip rate; MCU 2 continues normally |
 | Gateway contact stale | Local nodes stop routing to bridge | MCU 1 re-advertises every 4h |
 | MCU 1 power loss | Local mesh unaffected | MCU 2 continues as RTNode; no MeshCore traffic |
@@ -387,8 +385,9 @@ The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces 
 
 ### Phase 1 — Hardware bring-up
 - Flash RTNode-2400 `seeed_xiao_esp32s3_boundary` to MCU 2
-- Configure WiFi and backbone via captive portal
-- Verify MCU 2 connects to backbone and announces on Reticulum
+- Configure SX1280 backbone channel and uplink peer in RTNode-2400 interface settings
+- Verify MCU 2 connects to a backbone Reticulum node over SX1280 RF and announces on Reticulum
+- Verify SX1280 LoRa interface initialises in `MODE_ACCESS_POINT`
 - UART link with framing and CRC-16/CCITT verified between MCUs
 - Type 0x03/0x04 LXMF hash handshake working
 
@@ -426,7 +425,7 @@ The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces 
 
 1. **MeshCore companion protocol packet interception.** The companion protocol used by MCU 1 to interface with the MeshCore stack is not formally versioned. The bridge companion layer intercepts packets at this layer. What is the stability guarantee across MeshCore firmware updates? Version negotiation or a stability commitment is needed before this can be deployed at scale.
 
-2. **UART shim integration point in RTNode-2400.** The shim needs to inject packets into the microReticulum send pipeline on MCU 2. The cleanest integration point is as a new `InterfaceImpl` alongside `TcpInterface`. Confirm this is feasible within microReticulum 0.2.4's interface abstraction before starting Phase 3.
+2. **UART shim integration point in RTNode-2400.** The shim needs to inject packets into the microReticulum send pipeline on MCU 2. The cleanest integration point is as a new `InterfaceImpl` alongside the existing SX1280 interface. Confirm this is feasible within microReticulum 0.2.4's interface abstraction before starting Phase 3.
 
 3. **HKDF salt publication.** The salt value must be computed, published, and frozen as a protocol constant before any two independent bridge implementations attempt to interoperate. This is a coordination task, not a technical one, but it blocks interoperability.
 
