@@ -18,14 +18,15 @@ This specification describes a dual-MCU MeshCore–Reticulum bridge node consist
 
 RTNode-2400 provides a working, tested microReticulum boundary node implementation on ESP32-S3 with empirically measured RAM usage of ~29% (94 KB of 327 KB) in boundary mode. This eliminates the need to implement Reticulum from scratch and is the primary architectural change from v2.
 
-The MeshCore bridge logic — gateway contact registration, LXMF identity mapping, hop-count-zero ingress delivery, and contact manifest — is implemented as a companion layer on MCU 1, sitting between the MeshCore radio stack and the UART link to MCU 2.
+The bridge logic is split across both MCUs according to ownership. On MCU 2 we own RTNode-2400 and develop it directly: the UART interface, LXMF identity mapping, manifest storage, SPI flash driver, and any expansions to the path/announce tables are all first-party RTNode-2400 features. On MCU 1 we do not modify MeshCore; the bridge companion layer operates exclusively within the interface that MeshCore's companion protocol exposes, without touching the core routing stack.
 
 **The governing constraint throughout:** the local 868 MHz mesh behaves identically whether or not the bridge is present. The bridge is invisible to local nodes except as a single gateway contact. The mesh works when the bridge is down.
 
 ---
 
 ## 1. Hardware
-[WIP hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)
+
+[WIP hardware to support this use case](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)
 
 ### 1.1 Bill of Materials
 
@@ -72,33 +73,33 @@ MCU 2 halts UART output immediately on CTS HIGH. MCU 2 must buffer at least 2 pa
 
 ## 2. Firmware Overview
 
-### 2.1 MCU 2 — RTNode-2400 (No Modifications Required)
+### 2.1 MCU 2 — RTNode-2400 (Our Firmware)
 
-MCU 2 runs RTNode-2400 `seeed_xiao_esp32s3_boundary` build without modification. It operates as a standard Reticulum boundary transport node:
+MCU 2 runs RTNode-2400, which we develop and own. The base `seeed_xiao_esp32s3_boundary` build provides the microReticulum boundary node foundation. Bridge-specific features — the UART interface, manifest storage, SPI flash driver, and LXMF mapping — are implemented directly within RTNode-2400 as first-party code. The existing boundary node behaviour is retained unchanged:
 
 - SX1280 LoRa interface in `MODE_ACCESS_POINT`: sole backbone interface; blocks backbone announces from propagating back to RF
-- Path table capped at 48 entries; hash list at 32; announce queue at 4
+- Path table capped at 48 entries; hash list at 32; announce queue at 4 (expand using SPI flash — see §6.4)
 - Backbone announces cached to flash, served on demand when local nodes request paths
 - Default route forwarding: unroutable packets forwarded to backbone over SX1280
-
-The only addition required on MCU 2 is **UART serial input/output** handling to forward LXMF-encapsulated MeshCore packets between the UART link and the Reticulum stack. This is a new serial interface type, not a modification to existing interfaces. It can be implemented as a thin shim that reads framed packets from UART and injects them into the microReticulum packet pipeline, and vice versa.
 
 **MCU 2 memory budget (empirical, from RTNode-2400 README):**
 
 ```
 XIAO ESP32-S3 boundary build:
-  RAM:   28.8% used  (94,492 bytes of 327,680)
-  Flash: 27.0% used  (1,768,825 bytes of 6,553,600)
+  RAM:         28.8% used  (94,492 bytes of 327,680)
+  Internal flash: ~27% used  (~1.77 MB of ~6.5 MB usable, partition-table dependent)
 ```
+
+**External SPI flash:** The carrier board provides an additional 8 MB SPI flash chip accessible to the ESP32-S3. This is entirely separate from the ESP32-S3's internal flash and is available for bridge storage use — see §6.3 and §6.4.
 
 Headroom is comfortable. The UART shim adds negligible RAM overhead.
 
 ### 2.2 MCU 1 — MeshCore + Bridge Companion Layer
 
-MCU 1 runs MeshCore firmware  with an additional bridge companion layer that intercepts relevant packets and manages the UART link to MCU 2. This layer does not modify MeshCore's core routing behaviour.
+MCU 1 runs upstream MeshCore firmware which we do not and cannot modify. The bridge companion layer is implemented entirely within the interface MeshCore's companion protocol exposes — it does not touch the core routing stack, flooding logic, or radio driver. Any behaviour not achievable through the companion protocol API cannot be implemented on MCU 1.
 
 The bridge companion layer responsibilities:
-- On boot: register one gateway contact on the local MeshCore mesh
+- On boot: register one gateway contact on the local MeshCore mesh via companion protocol
 - Intercept outbound MeshCore packets addressed to the gateway contact and forward via UART
 - Receive inbound LXMF payloads from MCU 2 via UART and deliver to addressed local nodes with hop count 0
 - Maintain a local manifest of reachable MeshCore nodes for MCU 2 to serve remotely
@@ -295,13 +296,13 @@ MCU 1 removes a node from its local manifest and sends an update with last_seen 
 
 ---
 
-## 6. MCU 2 UART Shim (RTNode-2400 Addition)
+## 6. MCU 2 UART Interface (RTNode-2400 Feature)
 
-RTNode-2400 runs unmodified except for one addition: a UART serial interface shim that bridges the UART link to the microReticulum packet pipeline.
+The UART interface is a first-party RTNode-2400 feature implemented as a new interface type within microReticulum alongside the existing SX1280 LoRa interface.
 
-### 6.1 What the Shim Does
+### 6.1 What the UART Interface Does
 
-The shim is a new interface type alongside the existing SX1280 LoRa and TCP interfaces. It:
+The UART interface operates as a full microReticulum interface type. It:
 
 1. Reads framed packets from UART (type 0x01 from MCU 1)
 2. Unpacks source/destination MeshCore pubkeys and payload
@@ -328,21 +329,35 @@ This hash is stable across reboots (RTNode-2400 persists its Reticulum identity 
 
 ### 6.3 Manifest Storage and Service
 
-MCU 2 stores manifest entries received via type 0x05 frames in flash (SPIFFS/LittleFS partition, separate from RTNode-2400's existing log partition). It serves these as an LXMF resource at destination aspect `meshcore.bridge.manifest` when queried by remote bridges.
+MCU 2 stores manifest entries received via type 0x05 frames on the external SPI flash (see §6.4). It serves these as an LXMF resource at destination aspect `meshcore.bridge.manifest` when queried by remote bridges.
 
-**Manifest entry format on disk:** identical to the type 0x05 payload (90 bytes per entry), stored as a flat array. Maximum 64 entries (5,760 bytes) — adequate for a local mesh of typical size.
+**Manifest entry format on disk:** identical to the type 0x05 payload (90 bytes per entry), stored as a flat array. The 8 MB SPI flash supports far more than the minimum 64-entry (5,760 byte) working set — the practical limit is the local mesh size, not storage. The implementation should nevertheless enforce a configurable cap (default 512 entries, 46,080 bytes) to bound manifest query response time.
 
 **Manifest signing:** MCU 2 signs the serialised manifest with its Reticulum identity private key before serving. Remote bridges verify the signature against the bridge's known public key (obtainable from the Reticulum announce).
 
-### 6.4 Flash Partition Consideration
+### 6.4 External SPI Flash — Storage Layout
 
-RTNode-2400 on XIAO ESP32-S3 uses `default_16MB.csv` partition table. Flash usage in boundary build is 27% (1.77 MB of 6.55 MB). Approximately 4.8 MB remains. LittleFS manifest storage of 64 × 90 bytes = 5,760 bytes is negligible. No partition changes required.
+The carrier board provides 8 MB of SPI flash accessible to the ESP32-S3 via SPI. This storage is entirely separate from the ESP32-S3's internal flash and is not used by RTNode-2400's existing firmware. The bridge companion layer on MCU 2 mounts this device as a LittleFS volume and uses it exclusively for bridge data, leaving RTNode-2400's internal flash partitions untouched and requiring no changes to RTNode-2400's partition table.
+
+**Proposed SPI flash layout (LittleFS, 8 MB):**
+
+| Region | Size | Contents |
+|---|---|---|
+| Manifest store | 1 MB | Contact manifest entries (90 bytes × up to 11,650 entries) |
+| Announce cache | 6 MB | Persistent backbone announce cache — extends RTNode-2400's in-RAM cache to flash for large/sparse Reticulum networks |
+| Reserved | 1 MB | Future use |
+
+**Announce cache expansion:** RTNode-2400's in-RAM announce cache is currently capped at 32 entries. With 6 MB of SPI flash available, the cache backend can be extended to persist evicted entries to flash and serve them on path requests, meaningfully improving path resolution for large Reticulum networks. This is a first-party RTNode-2400 development task and should be implemented in Phase 5 or Phase 6 alongside the manifest store.
+
+The announce cache region may be left unformatted in Phase 1; the manifest store must be initialised on first boot.
+
+**SPI bus:** confirm pin assignments for the carrier's SPI flash chip against the carrier board schematic before firmware implementation. The SPI flash CS pin must not conflict with the Wio SX1280 shield's SPI CS.
 
 ---
 
-## 7. RTNode-2400 Interface Modes — Unchanged
+## 7. RTNode-2400 Interface Modes — Retained
 
-RTNode-2400's existing interface mode logic already implements the flood mitigation the bridge requires:
+The existing interface mode logic in RTNode-2400 already implements the flood mitigation the bridge requires. We retain it without change:
 
 | Interface | Mode | Effect |
 |---|---|---|
@@ -423,10 +438,12 @@ The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces 
 
 ## 11. Open Questions
 
-1. **MeshCore companion protocol packet interception.** The companion protocol used by MCU 1 to interface with the MeshCore stack is not formally versioned. The bridge companion layer intercepts packets at this layer. What is the stability guarantee across MeshCore firmware updates? Version negotiation or a stability commitment is needed before this can be deployed at scale.
+1. **MeshCore companion protocol API boundary.** We cannot modify MeshCore on MCU 1. The bridge companion layer is constrained to what the companion protocol API exposes. Three specific capabilities need confirmation before implementation can proceed: (a) can a gateway contact be registered and advertised programmatically via the companion API without user interaction; (b) can inbound packets be injected with an explicit hop count of 0; (c) can outbound packets addressed to a specific contact be intercepted before radio transmission. If any of these are not available in the current companion protocol, the architecture requires renegotiation — either upstream MeshCore exposes the necessary hooks, or the dual-MCU approach is revised. This is the highest-priority open question.
 
-2. **UART shim integration point in RTNode-2400.** The shim needs to inject packets into the microReticulum send pipeline on MCU 2. The cleanest integration point is as a new `InterfaceImpl` alongside the existing SX1280 interface. Confirm this is feasible within microReticulum 0.2.4's interface abstraction before starting Phase 3.
+2. **UART interface integration point in microReticulum.** Since we own RTNode-2400, the integration point is a design decision, not a feasibility question. The cleanest approach is implementing the UART interface as a new `InterfaceImpl` alongside the existing SX1280 interface within microReticulum's abstraction layer. This design should be documented and reviewed before starting Phase 3 implementation.
 
 3. **HKDF salt publication.** The salt value must be computed, published, and frozen as a protocol constant before any two independent bridge implementations attempt to interoperate. This is a coordination task, not a technical one, but it blocks interoperability.
 
 4. **Manifest query protocol.** The spec states manifests are served as LXMF resources at `meshcore.bridge.manifest` on request. The request packet format, response format for multi-entry manifests (stream of 90-byte records vs length-prefixed list), and pagination for large manifests are not yet defined. This must be specified before Phase 5.
+
+5. **SPI flash CS pin assignment.** The carrier board's external SPI flash and the Wio SX1280 shield both use SPI. Confirm that their chip-select pins do not conflict on the ESP32-S3, and verify the SPI flash is accessible at the expected CS pin, before implementing §6.4 storage initialisation.
