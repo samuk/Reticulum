@@ -2,9 +2,9 @@
 
 **Status:** Draft for community review  
 **Supersedes:** meshcore_bridge_spec_v2.md  
-**Companion document:** [LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging (Botterell, KD6O)](https://github.com/artbotterell/CoreNet) 
-**Upstream firmware base:** RTNode-2400 (GrayHatGuy / jrl290), microReticulum (attermann), RNode Firmware (markqvist)  
-**Author** A well known word-guessing machine with some input from samuk
+**Companion document:** [LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging](https://github.com/artbotterell/CoreNet) (Botterell, KD6O)  
+**Upstream firmware base:** [RTNode-2400](https://github.com/GrayHatGuy/RTNode-2400) (GrayHatGuy / jrl290), microReticulum (attermann), RNode Firmware (markqvist)  
+**WIP hardware reference:** [awesome-meshcore open hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)  
 **License:** GPL-3.0 (inherited)
 
 ---
@@ -14,10 +14,10 @@
 This specification describes a dual-MCU MeshCore–Reticulum bridge node consisting of:
 
 - **MCU 1 (MeshCore side):** Seeed XIAO nRF52840 + Wio SX1262, running MeshCore firmware with a bridge companion layer
-- **MCU 2 (Reticulum side):** Seeed XIAO ESP32-S3 + Wio SX1280, running RTNode-2400 (microReticulum boundary node)
+- **MCU 2 (Reticulum side):** Seeed XIAO ESP32-S3 + Wio SX1280, running [RTNode-2400](https://github.com/GrayHatGuy/RTNode-2400) (microReticulum boundary node)
 - **Interconnect:** UART with RTS/CTS hardware flow control
 
-RTNode-2400 provides a working, tested microReticulum boundary node implementation on ESP32-S3 with empirically measured RAM usage of ~29% (94 KB of 327 KB) in boundary mode. This eliminates the need to implement Reticulum from scratch and is the primary architectural change from v2.
+[RTNode-2400](https://github.com/GrayHatGuy/RTNode-2400) provides a working, tested microReticulum boundary node implementation on ESP32-S3 with empirically measured RAM usage of ~29% (94 KB of 327 KB) in boundary mode. This eliminates the need to implement Reticulum from scratch and is the primary architectural change from v2. The CoreNet project ([github.com/artbotterell/CoreNet](https://github.com/artbotterell/CoreNet)) defines the LXMF interoperability plane this bridge implements. WIP carrier hardware is tracked at [awesome-meshcore open hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md).
 
 The bridge logic is split across both MCUs according to ownership. On MCU 2 we own RTNode-2400 and develop it directly: the UART interface, LXMF identity mapping, manifest storage, SPI flash driver, and any expansions to the path/announce tables are all first-party RTNode-2400 features. On MCU 1 we do not modify MeshCore; the bridge companion layer operates exclusively within the interface that MeshCore's companion protocol exposes, without touching the core routing stack.
 
@@ -26,8 +26,6 @@ The bridge logic is split across both MCUs according to ownership. On MCU 2 we o
 ---
 
 ## 1. Hardware
-
-[WIP hardware to support this use case](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)
 
 ### 1.1 Bill of Materials
 
@@ -120,11 +118,26 @@ Byte offset   Length   Field
 2             1        Packet type (see below)
 3–4           2        Payload length, big-endian uint16 (max 512)
 5–N           N        Payload
-N+1–N+2       2        CRC-16/CCITT over bytes 2..N inclusive
-                       (polynomial 0x1021, init 0xFFFF)
+N+1–N+2       2        CRC-16/CCITT (polynomial 0x1021, init 0xFFFF)
+                       computed over: type byte, len_h, len_l, and all payload bytes
+                       i.e. every byte from offset 2 through offset N inclusive
 ```
 
 If LEN > 512, emit error frame type 0xFF with error code 0x03 and return to WAIT_MAGIC1 immediately. Do not wait for the declared number of bytes — a corrupted length field will otherwise stall the receiver indefinitely.
+
+**Payload size constraints by packet type:**
+
+| Type | Fixed payload size | Notes |
+|---|---|---|
+| 0x01 | 64 + N bytes | 32-byte source pubkey + 32-byte dest pubkey + MeshCore payload (N ≤ 448) |
+| 0x02 | 32 + N bytes | 32-byte dest pubkey + decrypted payload (N ≤ 480) |
+| 0x03 | 0 bytes | Hash request carries no payload |
+| 0x04 | 16 bytes | LXMF destination hash |
+| 0x05 | 90 bytes | Manifest entry (fixed, see §5.4) |
+| 0x06 | 1 byte | Echo of acknowledged packet type |
+| 0xFF | 1 byte | Error code |
+
+MeshCore packets are bounded by the SX1262 LoRa MTU. In practice MeshCore payloads do not exceed ~200 bytes; the 448-byte limit for type 0x01 provides margin. Implementations must not allocate static buffers of 512 bytes per frame — size buffers to the per-type maximum.
 
 **Packet types:**
 
@@ -185,7 +198,7 @@ Each MeshCore node reachable through this bridge needs a stable LXMF destination
 ```
 Inputs:
   IKM  = meshcore_ed25519_pubkey        (32 bytes, raw little-endian)
-  Salt = 0x3f2a1b8e...                  (32 bytes — see note below)
+  Salt = /* SEE CONSTANT BELOW */       (32 bytes)
   Info = "lxmf-destination-v1"          (UTF-8, no null terminator)
   L    = 32 bytes output
 
@@ -196,16 +209,21 @@ LXMF destination hash:
   lxmf_dest_hash = SHA-256(lxmf_preimage)[0:16]   (first 16 bytes)
 ```
 
-**Salt value — computed once, hardcoded in both MCUs:**
+**Salt value — protocol constant, hardcoded in both MCUs:**
 
+The salt is SHA-256 of the ASCII string `meshcore-lxmf-bridge-v1`. This is computed once offline by the protocol authors and frozen. Both MCU 1 and MCU 2 firmware embed it as a 32-byte literal constant. It is never computed at runtime.
+
+```c
+/* Protocol constant — do not modify */
+static const uint8_t LXMF_BRIDGE_SALT[32] = {
+    /* SHA-256("meshcore-lxmf-bridge-v1") */
+    /* TO BE FILLED BY PROTOCOL AUTHORS BEFORE FIRST RELEASE */
+    /* Compute offline: echo -n "meshcore-lxmf-bridge-v1" | sha256sum */
+    0x00, 0x00, /* ... 32 bytes ... */
+};
 ```
-Salt = SHA-256("meshcore-lxmf-bridge-v1")
 
-To compute:
-  python3 -c "import hashlib; print(hashlib.sha256(b'meshcore-lxmf-bridge-v1').hexdigest())"
-```
-
-This value must be computed by the implementor, verified independently, and hardcoded in both MCU 1 and MCU 2 firmware as a 32-byte constant. It must be identical across all bridge implementations for interoperability. A reference value should be published in the project repository before first release and treated as a protocol constant thereafter.
+This constant must be computed, verified by at least two independent implementations, published in the project repository, and treated as immutable thereafter. Any change to the salt invalidates all previously derived LXMF destination hashes and breaks interoperability with deployed bridges.
 
 **Why HKDF rather than direct Ed25519→Curve25519 conversion:**  
 Direct conversion is mathematically possible but requires explicit access to the Ed25519 scalar, which is not exposed by the nRF52840 Mbed TLS / nrf_crypto API. HKDF from the public key is implementable with standard primitives on both MCUs and produces a stable, one-way mapping.
@@ -313,7 +331,7 @@ The UART interface operates as a full microReticulum interface type. It:
 
 Inbound (backbone → local):
 1. microReticulum delivers an LXMF message addressed to a locally-registered MeshCore node destination
-2. Shim extracts destination MeshCore pubkey (reverse-mapped from LXMF hash via manifest)
+2. UART interface extracts destination MeshCore pubkey (reverse-mapped from LXMF hash via manifest)
 3. Builds type 0x02 frame with dest pubkey and decrypted payload
 4. Sends to MCU 1 via UART (honour CTS)
 
@@ -338,7 +356,7 @@ MCU 2 stores manifest entries received via type 0x05 frames on the external SPI 
 
 ### 6.4 External SPI Flash — Storage Layout
 
-The carrier board provides 8 MB of SPI flash accessible to the ESP32-S3 via SPI. This storage is entirely separate from the ESP32-S3's internal flash and is not used by RTNode-2400's existing firmware. The bridge companion layer on MCU 2 mounts this device as a LittleFS volume and uses it exclusively for bridge data, leaving RTNode-2400's internal flash partitions untouched and requiring no changes to RTNode-2400's partition table.
+The carrier board provides 8 MB of SPI flash accessible to the ESP32-S3 via SPI. This storage is entirely separate from the ESP32-S3's internal flash. RTNode-2400 uses internal flash for its NVS identity store and announce cache; the SPI flash is unused by the base RTNode-2400 firmware and is available exclusively for bridge data. No changes to RTNode-2400's internal partition table are required.
 
 **Proposed SPI flash layout (LittleFS, 8 MB):**
 
@@ -363,15 +381,15 @@ The existing interface mode logic in RTNode-2400 already implements the flood mi
 | Interface | Mode | Effect |
 |---|---|---|
 | SX1280 LoRa (MCU2) | `MODE_ACCESS_POINT` | Sole backbone interface; blocks backbone announces from re-propagating to RF |
-| UART shim (new) | `MODE_ACCESS_POINT` | Blocks backbone announces from crossing to MeshCore side |
+| UART interface (new) | `MODE_ACCESS_POINT` | Blocks backbone announces from crossing to MeshCore side |
 
-The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces do not propagate to MCU 1 and from there onto the 868 MHz MeshCore mesh. This is the Reticulum-layer enforcement of the "no advert propagation" principle; MCU 1's hop-count-zero ingress is the MeshCore-layer enforcement.
+The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum announces do not propagate to MCU 1 and from there onto the 868 MHz MeshCore mesh. This is the Reticulum-layer enforcement of the "no advert propagation" principle; MCU 1's hop-count-zero ingress is the MeshCore-layer enforcement.
 
 ---
 
 ## 8. Protocol Boundary Table
 
-| Traffic type | 868 MHz RF | MCU1 bridge layer | UART | MCU2 UART shim | SX1280 backbone |
+| Traffic type | 868 MHz RF | MCU1 bridge layer | UART | MCU2 UART interface | SX1280 backbone |
 |---|---|---|---|---|---|
 | Local→Local DM | ✓ direct | Passes through | ✗ | ✗ | ✗ |
 | Local→Remote DM | Received by MCU1 | Intercepts | type 0x01 → | LXMF outbound | RF |
@@ -448,3 +466,15 @@ The UART shim must use `MODE_ACCESS_POINT` so that backbone Reticulum announces 
 4. **Manifest query protocol.** The spec states manifests are served as LXMF resources at `meshcore.bridge.manifest` on request. The request packet format, response format for multi-entry manifests (stream of 90-byte records vs length-prefixed list), and pagination for large manifests are not yet defined. This must be specified before Phase 5.
 
 5. **SPI flash CS pin assignment.** The carrier board's external SPI flash and the Wio SX1280 shield both use SPI. Confirm that their chip-select pins do not conflict on the ESP32-S3, and verify the SPI flash is accessible at the expected CS pin, before implementing §6.4 storage initialisation.
+
+6. **`contact_type = REPEATER` side effects.** The gateway contact is registered as type REPEATER (the closest available type) pending a BRIDGE type being added to MeshCore upstream. MeshCore's routing logic behaviour toward a REPEATER-typed contact needs to be characterised — specifically whether it affects path selection, flooding scope, or message TTL handling in unintended ways. This should be resolved before Phase 2 field testing.
+
+7. **Hop count 0 injection via companion protocol.** §5.2 specifies that inbound packets are delivered with hop limit set to 0. Confirm that the MeshCore companion protocol API permits construction and injection of a packet with an explicit hop count field, rather than requiring packet modification after the fact. If the companion API does not expose this, the no-reflood guarantee cannot be implemented on MCU 1 without upstream MeshCore changes.
+
+8. **Inbound delivery to unknown local node.** If an LXMF message arrives on MCU 2 addressed to a MeshCore node that has no manifest entry (never heard on the local mesh), the UART interface returns error 0x02 and the message is silently dropped. The remote sender receives no delivery failure notification. Define whether a best-effort retry hold queue should be implemented on MCU 2 (hold for N minutes pending a manifest entry for that destination), or whether silent drop is acceptable.
+
+9. **HKDF two-step rationale.** §4.2 derives a 32-byte HKDF output then takes SHA-256 of it, using only the first 16 bytes of that hash as the LXMF destination. If this matches Reticulum's own destination hash derivation format, document the match explicitly. If it does not, simplify to HKDF with L=16 directly.
+
+10. **SPI flash failure mode.** The manifest store and announce cache expansion both reside on the external SPI flash. If the device is unreadable at boot (corruption, hardware fault), the bridge must degrade gracefully — MCU 2 continues as a functional RTNode-2400 boundary node, and MCU 1 is notified so it can suppress manifest pushes. Define the detection and fallback behaviour.
+
+11. **Power budget and boot sequencing.** The 3V3 shared rail in §1.3 is noted as requiring a current budget check but no figures are given. The ESP32-S3 with SX1280 and SPI flash initialisation at boot draws significantly more than steady-state. Characterise peak current, confirm the rail can supply both MCUs simultaneously, and document the expected MCU 2 boot time so the MCU 1 retry interval (currently 30 s) can be validated as sufficient.
