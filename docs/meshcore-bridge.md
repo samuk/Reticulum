@@ -5,6 +5,7 @@
 **Companion document:** [LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging](https://github.com/artbotterell/CoreNet) (Botterell, KD6O)  
 **Upstream firmware base:** [RTNode-2400](https://github.com/GrayHatGuy/RTNode-2400) (GrayHatGuy / jrl290), microReticulum (attermann), RNode Firmware (markqvist)  
 **WIP hardware reference:** [awesome-meshcore open hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)  
+**Author** Primarily a word guessing machine, some input from samuk
 **License:** GPL-3.0 (inherited)
 
 ---
@@ -93,16 +94,16 @@ XIAO ESP32-S3 boundary build:
 
 Headroom is comfortable. The UART shim adds negligible RAM overhead.
 
-### 2.2 MCU 1 — MeshCore + Bridge Companion Layer
+### 2.2 MCU 1 — MeshCore Repeater Firmware + Bridge Layer
 
-MCU 1 runs upstream MeshCore firmware which we do not and cannot modify. The bridge companion layer is implemented entirely within the interface MeshCore's companion protocol exposes — it does not touch the core routing stack, flooding logic, or radio driver. Any behaviour not achievable through the companion protocol API cannot be implemented on MCU 1.
+MCU 1 runs upstream MeshCore **repeater** firmware which we do not and cannot modify. The bridge layer runs alongside it, communicating via the serial interface that the repeater firmware exposes. It does not touch the core routing stack, flooding logic, or radio driver. Any behaviour not achievable through the repeater firmware's serial interface cannot be implemented on MCU 1.
 
-The bridge companion layer responsibilities:
-- On boot: register one gateway contact on the local MeshCore mesh via companion protocol
-- Intercept outbound MeshCore packets addressed to the gateway contact and forward via UART
+The bridge layer responsibilities:
+- On boot: register one gateway contact on the local MeshCore mesh via the repeater serial interface
+- Intercept outbound MeshCore packets addressed to the gateway contact and forward via UART to MCU 2
 - Receive inbound LXMF payloads from MCU 2 via UART and deliver to addressed local nodes with hop count 0
 - Maintain a local manifest of reachable MeshCore nodes for MCU 2 to serve remotely
-- Manage CTS flow control
+- Manage CTS flow control on the MCU 1 ↔ MCU 2 UART link
 
 ---
 
@@ -193,21 +194,22 @@ MCU 1 uses this hash as the `lxmf_hash` field in the gateway contact it register
 
 ### 4.2 MeshCore Node → LXMF Destination Mapping
 
-Each MeshCore node reachable through this bridge needs a stable LXMF destination. Derive deterministically from the MeshCore Ed25519 public key using HKDF-SHA256:
+Each MeshCore node reachable through this bridge needs a stable LXMF destination hash, derived deterministically from its MeshCore Ed25519 public key. This derivation is performed **once** when a manifest entry is received (type 0x05 on MCU 2, or on first hearing a node on MCU 1), and the result is stored in the SPI flash manifest as a precomputed lookup table entry. It is never recomputed at packet delivery time — inbound LXMF delivery is an O(1) manifest lookup, not a per-packet HKDF operation.
+
+**Derivation (performed once per node, at manifest entry time):**
 
 ```
 Inputs:
   IKM  = meshcore_ed25519_pubkey        (32 bytes, raw little-endian)
   Salt = /* SEE CONSTANT BELOW */       (32 bytes)
   Info = "lxmf-destination-v1"          (UTF-8, no null terminator)
-  L    = 32 bytes output
+  L    = 16 bytes output
 
-Intermediate:
-  lxmf_preimage = HKDF-SHA256(IKM, Salt, Info, 32)
-
-LXMF destination hash:
-  lxmf_dest_hash = SHA-256(lxmf_preimage)[0:16]   (first 16 bytes)
+Result:
+  lxmf_dest_hash = HKDF-SHA256(IKM, Salt, Info, 16)   (16 bytes, stored directly)
 ```
+
+HKDF-SHA256 with L=16 produces the destination hash directly. The ESP32-S3 hardware SHA accelerator makes this fast, but it is still called only once per node, not per packet.
 
 **Salt value — protocol constant, hardcoded in both MCUs:**
 
@@ -228,15 +230,15 @@ This constant must be computed, verified by at least two independent implementat
 **Why HKDF rather than direct Ed25519→Curve25519 conversion:**  
 Direct conversion is mathematically possible but requires explicit access to the Ed25519 scalar, which is not exposed by the nRF52840 Mbed TLS / nrf_crypto API. HKDF from the public key is implementable with standard primitives on both MCUs and produces a stable, one-way mapping.
 
-**Reverse mapping** (LXMF destination → MeshCore display name) is handled by the contact manifest (Section 6). A node present in the bridge's coverage area but not yet in any manifest is displayed as `[unknown:XXXX]` where XXXX is the first 4 hex characters of the LXMF destination hash.
+**Reverse mapping** (LXMF destination hash → MeshCore pubkey and display name) is stored as a flat lookup table in the SPI flash manifest. On MCU 2, inbound LXMF delivery scans this table by lxmf_dest_hash. A node not present in the manifest cannot be delivered to — see open question 8.
 
 ---
 
-## 5. MCU 1 Bridge Companion Layer
+## 5. MCU 1 Bridge Layer
 
 ### 5.1 Gateway Contact Registration
 
-After receiving the LXMF hash from MCU 2 (type 0x04), MCU 1 registers one contact on the local MeshCore mesh:
+After receiving the LXMF hash from MCU 2 (type 0x04), MCU 1 registers one contact on the local MeshCore mesh via the repeater firmware serial interface:
 
 ```c
 struct GatewayContact {
@@ -358,19 +360,48 @@ MCU 2 stores manifest entries received via type 0x05 frames on the external SPI 
 
 The carrier board provides 8 MB of SPI flash accessible to the ESP32-S3 via SPI. This storage is entirely separate from the ESP32-S3's internal flash. RTNode-2400 uses internal flash for its NVS identity store and announce cache; the SPI flash is unused by the base RTNode-2400 firmware and is available exclusively for bridge data. No changes to RTNode-2400's internal partition table are required.
 
+**SPI bus:** The carrier board provides separate CS pins for the SPI flash and the Wio SX1280 shield. CS pin assignment is confirmed resolved — verify against the carrier schematic before firmware bring-up and document the pin assignments in the project repository.
+
 **Proposed SPI flash layout (LittleFS, 8 MB):**
 
 | Region | Size | Contents |
 |---|---|---|
-| Manifest store | 1 MB | Contact manifest entries (90 bytes × up to 11,650 entries) |
-| Announce cache | 6 MB | Persistent backbone announce cache — extends RTNode-2400's in-RAM cache to flash for large/sparse Reticulum networks |
+| Manifest store | 1 MB | Contact manifest + LXMF→pubkey lookup table (90 bytes × up to 11,650 entries) |
+| Inbound delivery queue | 6 MB | Per-destination packet queue for 868 MHz rate limiting — see §6.5 |
 | Reserved | 1 MB | Future use |
 
-**Announce cache expansion:** RTNode-2400's in-RAM announce cache is currently capped at 32 entries. With 6 MB of SPI flash available, the cache backend can be extended to persist evicted entries to flash and serve them on path requests, meaningfully improving path resolution for large Reticulum networks. This is a first-party RTNode-2400 development task and should be implemented in Phase 5 or Phase 6 alongside the manifest store.
+### 6.5 Inbound Rate Mismatch — Delivery Queue
 
-The announce cache region may be left unformatted in Phase 1; the manifest store must be initialised on first boot.
+The SX1280 backbone at 2.4 GHz can deliver packets to MCU 2 faster than the 868 MHz SX1262 on MCU 1 can drain them to local nodes. The CTS flow control on the UART link (§1.3) only manages the inter-MCU link; it does not prevent the backbone from accumulating a backlog that exceeds MCU 1's radio airtime budget.
 
-**SPI bus:** confirm pin assignments for the carrier's SPI flash chip against the carrier board schematic before firmware implementation. The SPI flash CS pin must not conflict with the Wio SX1280 shield's SPI CS.
+MCU 2 maintains a per-destination inbound delivery queue on SPI flash in the 6 MB region allocated above. When an LXMF message arrives from the backbone:
+
+```
+Receive LXMF message addressed to known local destination
+If MCU 1 is ready (CTS not asserted, queue for this dest is empty):
+    Forward immediately via type 0x02 frame
+Else:
+    Append to per-destination queue on SPI flash
+    Record: arrival timestamp, dest pubkey, payload
+
+Drain loop (runs whenever CTS is deasserted):
+    For each destination with queued packets (oldest first):
+        Dequeue one packet
+        Send type 0x02 to MCU 1
+        Wait for type 0x06 ACK before dequeueing next packet for same destination
+```
+
+**Queue limits:**
+
+| Parameter | Value | Rationale |
+|---|---|---|
+| Max queue depth per destination | 16 packets | Bounds per-node SPI flash consumption |
+| Max total queued packets | 512 | ~6 MB at ~12 KB average entry with metadata |
+| Max queue age | 10 minutes | Stale packets dropped on drain; mesh DM semantics do not guarantee delivery |
+
+When the per-destination queue is full, the oldest queued packet for that destination is dropped (head-drop) to make room for the new arrival. This preserves recency and bounds SPI flash wear. MCU 2 does not notify the sender of drops; this matches MeshCore's existing best-effort DM semantics.
+
+**SPI flash wear:** at typical MeshCore mesh traffic rates (tens of messages per day per node), queue write cycles are negligible against the SPI flash endurance rating.
 
 ---
 
@@ -406,12 +437,14 @@ The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum annou
 
 | Failure | Local mesh behaviour | Bridge behaviour |
 |---|---|---|
-| MCU 2 power loss | Unaffected | Gateway contact goes stale after MeshCore 4h timeout |
+| MCU 2 power loss | Unaffected | Gateway contact goes stale after MeshCore 4h timeout; queued inbound packets lost |
 | SX1280 backbone RF link lost | Unaffected | MCU 2 buffers outbound; retries with exponential backoff (RTNode-2400 built-in); no backbone delivery until RF restored |
 | UART CRC errors >5% over 60s | Unaffected | MCU 1 logs, backs off drip rate; MCU 2 continues normally |
 | Gateway contact stale | Local nodes stop routing to bridge | MCU 1 re-advertises every 4h |
-| MCU 1 power loss | Local mesh unaffected | MCU 2 continues as RTNode; no MeshCore traffic |
+| MCU 1 power loss | Local mesh unaffected | MCU 2 continues as RTNode; inbound queue accumulates on SPI flash until MCU 1 recovers |
 | Manifest stale (MCU 2 reboots) | Unaffected | MCU 1 replays all known nodes via type 0x05 on next boot |
+| Inbound queue full (per-destination) | Unaffected | Head-drop: oldest queued packet for that destination dropped silently; best-effort semantics |
+| SPI flash failure | Unaffected | MCU 2 continues as plain RTNode-2400 boundary node; manifest and delivery queue unavailable; MCU 1 notified to suppress manifest pushes |
 
 ---
 
@@ -432,12 +465,12 @@ The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum annou
 
 ### Phase 3 — Outbound path (local → backbone)
 - MCU 1 intercepts packets to gateway, sends type 0x01 to MCU 2
-- MCU 2 UART shim receives, derives LXMF destination, sends via Reticulum
+- MCU 2 UART interface receives, looks up LXMF destination from manifest, sends via Reticulum
 - Verify delivery at a remote Reticulum node
 
 ### Phase 4 — Inbound path (backbone → local)
 - MCU 2 receives LXMF message for local MeshCore node
-- UART shim sends type 0x02 to MCU 1
+- UART interface sends type 0x02 to MCU 1 (or queues to SPI flash if CTS asserted)
 - MCU 1 delivers to local node with hop count 0
 - Verify: packet not re-flooded
 
@@ -457,7 +490,7 @@ The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum annou
 
 ## 11. Open Questions
 
-1. **MeshCore companion protocol API boundary.** We cannot modify MeshCore on MCU 1. The bridge companion layer is constrained to what the companion protocol API exposes. Three specific capabilities need confirmation before implementation can proceed: (a) can a gateway contact be registered and advertised programmatically via the companion API without user interaction; (b) can inbound packets be injected with an explicit hop count of 0; (c) can outbound packets addressed to a specific contact be intercepted before radio transmission. If any of these are not available in the current companion protocol, the architecture requires renegotiation — either upstream MeshCore exposes the necessary hooks, or the dual-MCU approach is revised. This is the highest-priority open question.
+1. **MeshCore repeater firmware serial interface boundary.** We cannot modify MeshCore on MCU 1. The bridge layer is constrained to what the repeater firmware's serial interface exposes. Three specific capabilities need confirmation before implementation can proceed: (a) can a gateway contact be registered and advertised programmatically via the serial interface without user interaction; (b) can inbound packets be injected with an explicit hop count of 0; (c) can outbound packets addressed to a specific contact be intercepted before radio transmission. The repeater firmware's serial interface is less fully documented than the companion protocol — if any of these are not available, the architecture requires renegotiation with upstream MeshCore. This is the highest-priority open question.
 
 2. **UART interface integration point in microReticulum.** Since we own RTNode-2400, the integration point is a design decision, not a feasibility question. The cleanest approach is implementing the UART interface as a new `InterfaceImpl` alongside the existing SX1280 interface within microReticulum's abstraction layer. This design should be documented and reviewed before starting Phase 3 implementation.
 
@@ -465,16 +498,12 @@ The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum annou
 
 4. **Manifest query protocol.** The spec states manifests are served as LXMF resources at `meshcore.bridge.manifest` on request. The request packet format, response format for multi-entry manifests (stream of 90-byte records vs length-prefixed list), and pagination for large manifests are not yet defined. This must be specified before Phase 5.
 
-5. **SPI flash CS pin assignment.** The carrier board's external SPI flash and the Wio SX1280 shield both use SPI. Confirm that their chip-select pins do not conflict on the ESP32-S3, and verify the SPI flash is accessible at the expected CS pin, before implementing §6.4 storage initialisation.
+5. **`contact_type = REPEATER` side effects.** The gateway contact is registered as type REPEATER (the closest available type) pending a BRIDGE type being added to MeshCore upstream. MeshCore's routing logic behaviour toward a REPEATER-typed contact needs to be characterised — specifically whether it affects path selection, flooding scope, or message TTL handling in unintended ways. This should be resolved before Phase 2 field testing.
 
-6. **`contact_type = REPEATER` side effects.** The gateway contact is registered as type REPEATER (the closest available type) pending a BRIDGE type being added to MeshCore upstream. MeshCore's routing logic behaviour toward a REPEATER-typed contact needs to be characterised — specifically whether it affects path selection, flooding scope, or message TTL handling in unintended ways. This should be resolved before Phase 2 field testing.
+6. **Hop count 0 injection via repeater serial interface.** §5.2 specifies that inbound packets are delivered with hop limit set to 0. Confirm that the repeater firmware serial interface permits construction and injection of a packet with an explicit hop count field. If it does not, the no-reflood guarantee cannot be implemented on MCU 1 without upstream MeshCore changes.
 
-7. **Hop count 0 injection via companion protocol.** §5.2 specifies that inbound packets are delivered with hop limit set to 0. Confirm that the MeshCore companion protocol API permits construction and injection of a packet with an explicit hop count field, rather than requiring packet modification after the fact. If the companion API does not expose this, the no-reflood guarantee cannot be implemented on MCU 1 without upstream MeshCore changes.
+7. **Inbound delivery to unknown local node.** If an LXMF message arrives on MCU 2 addressed to a MeshCore node that has no manifest entry, the UART interface returns error 0x02 and the message is silently dropped. Define whether a best-effort retry hold queue should be implemented on MCU 2 (hold for N minutes pending a manifest entry for that destination), or whether silent drop is acceptable.
 
-8. **Inbound delivery to unknown local node.** If an LXMF message arrives on MCU 2 addressed to a MeshCore node that has no manifest entry (never heard on the local mesh), the UART interface returns error 0x02 and the message is silently dropped. The remote sender receives no delivery failure notification. Define whether a best-effort retry hold queue should be implemented on MCU 2 (hold for N minutes pending a manifest entry for that destination), or whether silent drop is acceptable.
+8. **SPI flash failure mode.** The manifest store and inbound delivery queue both reside on the external SPI flash. If the device is unreadable at boot, MCU 2 must continue as a functional RTNode-2400 boundary node and notify MCU 1 to suppress manifest pushes. Define the detection and fallback behaviour, and add a type 0xFF error subcode for this condition.
 
-9. **HKDF two-step rationale.** §4.2 derives a 32-byte HKDF output then takes SHA-256 of it, using only the first 16 bytes of that hash as the LXMF destination. If this matches Reticulum's own destination hash derivation format, document the match explicitly. If it does not, simplify to HKDF with L=16 directly.
-
-10. **SPI flash failure mode.** The manifest store and announce cache expansion both reside on the external SPI flash. If the device is unreadable at boot (corruption, hardware fault), the bridge must degrade gracefully — MCU 2 continues as a functional RTNode-2400 boundary node, and MCU 1 is notified so it can suppress manifest pushes. Define the detection and fallback behaviour.
-
-11. **Power budget and boot sequencing.** The 3V3 shared rail in §1.3 is noted as requiring a current budget check but no figures are given. The ESP32-S3 with SX1280 and SPI flash initialisation at boot draws significantly more than steady-state. Characterise peak current, confirm the rail can supply both MCUs simultaneously, and document the expected MCU 2 boot time so the MCU 1 retry interval (currently 30 s) can be validated as sufficient.
+9. **Power budget and boot sequencing.** The 3V3 shared rail in §1.3 is noted as requiring a current budget check but no figures are given. The ESP32-S3 with SX1280 and SPI flash initialisation at boot draws significantly more than steady-state. Characterise peak current, confirm the rail can supply both MCUs simultaneously, and document the expected MCU 2 boot time so the MCU 1 retry interval (currently 30 s) can be validated as sufficient.
