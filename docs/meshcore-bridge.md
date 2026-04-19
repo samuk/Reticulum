@@ -5,7 +5,7 @@
 **Companion document:** [LXMF as an Interoperability Plane for MeshCore Wide-Area Bridging](https://github.com/artbotterell/CoreNet) (Botterell, KD6O)  
 **Upstream firmware base:** [RTNode-2400](https://github.com/GrayHatGuy/RTNode-2400) (GrayHatGuy / jrl290), microReticulum (attermann), RNode Firmware (markqvist)  
 **WIP hardware reference:** [awesome-meshcore open hardware](https://github.com/samuk/awesome-meshcore/blob/main/open_hardware.md)  
-**Author** Primarily a word guessing machine, some input from samuk
+**Author** A word guessing machine with input from samuk
 **License:** GPL-3.0 (inherited)
 
 ---
@@ -94,15 +94,25 @@ XIAO ESP32-S3 boundary build:
 
 Headroom is comfortable. The UART shim adds negligible RAM overhead.
 
-### 2.2 MCU 1 — MeshCore Repeater Firmware + Bridge Layer
+### 2.2 MCU 1 — MeshCore Companion Firmware + Bridge Layer
 
-MCU 1 runs upstream MeshCore **repeater** firmware which we do not and cannot modify. The bridge layer runs alongside it, communicating via the serial interface that the repeater firmware exposes. It does not touch the core routing stack, flooding logic, or radio driver. Any behaviour not achievable through the repeater firmware's serial interface cannot be implemented on MCU 1.
+MCU 1 runs upstream MeshCore **companion** firmware which we do not and cannot modify. The companion firmware exposes a well-documented binary frame protocol over USB serial (protocol version 8, last updated Feb 2026), which is the intended programmatic interface for external applications. The bridge layer on MCU 1 implements this protocol as a client — it is, from MeshCore's perspective, the companion app.
 
-The bridge layer responsibilities:
-- On boot: register one gateway contact on the local MeshCore mesh via the repeater serial interface
-- Intercept outbound MeshCore packets addressed to the gateway contact and forward via UART to MCU 2
-- Receive inbound LXMF payloads from MCU 2 via UART and deliver to addressed local nodes with hop count 0
-- Maintain a local manifest of reachable MeshCore nodes for MCU 2 to serve remotely
+**Companion protocol USB serial framing:**
+```
+Outbound (radio → bridge):  0x3E ('>')  +  length[2] little-endian  +  frame
+Inbound  (bridge → radio):  0x3C ('<')  +  length[2] little-endian  +  frame
+Max frame size: 255 bytes. Protocol documented at:
+https://github.com/meshcore-dev/MeshCore/wiki/Companion-Radio-Protocol
+```
+
+This is entirely separate from the MCU 1 ↔ MCU 2 bridge UART link defined in §3. MCU 1 uses two serial interfaces: one facing MeshCore (companion protocol over USB serial pins) and one facing MCU 2 (bridge UART with RTS/CTS, §3). Confirm these are on separate UART peripherals on the nRF52840.
+
+The bridge layer responsibilities, mapped to companion protocol commands:
+- On boot: register gateway contact via `CMD_ADD_UPDATE_CONTACT` (0x09), type = `ADV_TYPE_REPEATER` (2)
+- Receive inbound messages: listen for `PUSH_CODE_MSG_WAITING` (0x83), pull with `CMD_SYNC_NEXT_MESSAGE` (0x0A)
+- Deliver inbound LXMF payloads to local nodes via `CMD_SEND_RAW_DATA` (0x19) with `path_len = 0` (zero-hop direct delivery, equivalent to hop count 0)
+- Observe newly heard nodes via `PUSH_CODE_ADVERT` (0x80) and `PUSH_CODE_NEW_ADVERT` (0x8A); push manifest entries to MCU 2
 - Manage CTS flow control on the MCU 1 ↔ MCU 2 UART link
 
 ---
@@ -238,24 +248,28 @@ Direct conversion is mathematically possible but requires explicit access to the
 
 ### 5.1 Gateway Contact Registration
 
-After receiving the LXMF hash from MCU 2 (type 0x04), MCU 1 registers one contact on the local MeshCore mesh via the repeater firmware serial interface:
+After receiving the LXMF hash from MCU 2 (type 0x04), MCU 1 sends `CMD_ADD_UPDATE_CONTACT` (0x09) to register the gateway contact:
 
-```c
-struct GatewayContact {
-    char    display_name[32];   // "[GW-{REGION}]" e.g. "[GW-UK1]"
-    uint8_t contact_type;       // REPEATER (or BRIDGE if added upstream)
-    uint8_t lxmf_hash[16];      // From MCU2 type 0x04 response
-    uint8_t hop_count;          // 1 — bridge is one hop from local nodes
-};
+```
+CMD_ADD_UPDATE_CONTACT {
+  code:         0x09
+  public_key:   bytes(32)        // bridge Reticulum identity public key (from type 0x04)
+  type:         0x02             // ADV_TYPE_REPEATER
+  flags:        0x00
+  out_path_len: 0x00             // direct — bridge is one hop away
+  out_path:     bytes(64) zeros
+  adv_name:     "[GW-UK1]\0..."  // null-padded to 32 bytes
+  last_advert:  uint32           // current epoch time
+}
 ```
 
 **Do not:**
-- Set hop_count to 0 (reserved for direct local contacts)
+- Set `out_path_len` > 0 (the bridge is directly reachable, not via a multi-hop path)
 - Force link quality to maximum (dishonest, causes routing pathologies)
 - Register more than one gateway contact regardless of how many remote nodes are reachable
-- Re-register on every boot if the contact and lxmf_hash are unchanged in persistent storage
+- Re-register on every boot if the contact and public key are unchanged in persistent storage
 
-Re-register only if the lxmf_hash changes, which happens only if MCU 2 is factory-reset. Re-advertise the gateway contact every 4 hours to match MeshCore repeater advert interval.
+Re-register only if the MCU 2 Reticulum identity changes (factory reset). Re-send `CMD_SEND_SELF_ADVERT` (0x07) every 4 hours to keep the gateway contact alive on the local mesh.
 
 ### 5.2 Inbound Delivery (Backbone → Local, MCU2 → MCU1)
 
@@ -265,34 +279,44 @@ Verify CRC
 Extract from payload:
   dest_meshcore_pubkey[32]
   meshcore_payload[N]
-Find local MeshCore node matching dest_meshcore_pubkey
+Find local MeshCore node matching dest_meshcore_pubkey in companion contacts list
 If found:
-  Deliver meshcore_payload to node via SX1262
-  Set MeshCore hop limit field to 0 in delivered packet
+  Send CMD_SEND_RAW_DATA (0x19) to MeshCore:
+    path_len = 0x00      // zero-hop: delivers direct, no re-flooding
+    path     = (empty)
+    payload  = meshcore_payload[N]
   Send type 0x06 ACK to MCU 2
 If not found:
   Send type 0xFF error 0x02 to MCU 2
 ```
 
-Hop limit 0 is mandatory. It prevents the packet being re-flooded by any MeshCore repeater that receives it.
+`path_len = 0` is mandatory. It causes MeshCore to deliver the packet as a direct transmission without inserting it into the flood mesh, preventing re-flooding by any repeater that receives it. This is the companion protocol equivalent of hop count 0.
 
 ### 5.3 Outbound Handling (Local → Backbone, MCU1 → MCU2)
 
+The bridge layer is the MeshCore companion app on MCU 1. Local nodes address messages to the gateway contact's public key; MeshCore delivers these to the bridge layer as `PUSH_CODE_MSG_WAITING` (0x83) push notifications.
+
 ```
-Receive MeshCore packet addressed to gateway contact
-Extract:
-  source_pubkey[32]
-  destination_pubkey[32]
-  meshcore_payload[N]
-Verify destination_pubkey is NOT a locally reachable node (routing error if so)
+Receive PUSH_CODE_MSG_WAITING (0x83) from MeshCore companion
+Send CMD_SYNC_NEXT_MESSAGE (0x0A) to pull message
+Receive RESP_CODE_CONTACT_MSG_RECV_V3 (0x10):
+  pubkey_prefix[6]      // first 6 bytes of sender's public key
+  path_len              // hop count
+  txt_type
+  sender_timestamp
+  text[N]
+Resolve full sender pubkey from companion contacts list using pubkey_prefix
 Build type 0x01 payload:
-  source_pubkey[32] || destination_pubkey[32] || meshcore_payload[N]
+  sender_pubkey[32] || gateway_pubkey[32] || text[N]
 Send to MCU 2 via UART (honour CTS)
+Continue CMD_SYNC_NEXT_MESSAGE until RESP_CODE_NO_MORE_MESSAGES (0x0A)
 ```
+
+Note: `pubkey_prefix` in the companion protocol is only 6 bytes. The bridge layer resolves the full 32-byte sender public key by matching against the companion contacts list retrieved via `CMD_GET_CONTACTS` (0x04). If no match is found, the message is held until the next contacts sync, which is triggered by any `PUSH_CODE_ADVERT` (0x80).
 
 ### 5.4 Manifest Push
 
-When MCU 1 hears a MeshCore node on the local 868 MHz mesh (new node or updated last_seen), it pushes a type 0x05 manifest entry to MCU 2:
+When the companion firmware notifies the bridge layer of a newly heard or updated node via `PUSH_CODE_ADVERT` (0x80) or `PUSH_CODE_NEW_ADVERT` (0x8A), the bridge layer fetches the full contact record via `CMD_GET_CONTACTS` (0x04) and pushes a type 0x05 manifest entry to MCU 2:
 
 ```
 Type 0x05 payload (90 bytes):
@@ -490,7 +514,7 @@ The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum annou
 
 ## 11. Open Questions
 
-1. **MeshCore repeater firmware serial interface boundary.** We cannot modify MeshCore on MCU 1. The bridge layer is constrained to what the repeater firmware's serial interface exposes. Three specific capabilities need confirmation before implementation can proceed: (a) can a gateway contact be registered and advertised programmatically via the serial interface without user interaction; (b) can inbound packets be injected with an explicit hop count of 0; (c) can outbound packets addressed to a specific contact be intercepted before radio transmission. The repeater firmware's serial interface is less fully documented than the companion protocol — if any of these are not available, the architecture requires renegotiation with upstream MeshCore. This is the highest-priority open question.
+1. **Companion firmware serial interface — confirmed viable.** The MeshCore companion firmware exposes a fully documented binary frame protocol over USB serial (protocol version 8). All three required capabilities are available: (a) `CMD_ADD_UPDATE_CONTACT` (0x09) registers contacts programmatically; (b) `CMD_SEND_RAW_DATA` (0x19) with `path_len = 0` delivers packets direct/zero-hop without re-flooding; (c) the bridge layer IS the companion app — outbound traffic is received via `PUSH_CODE_MSG_WAITING` (0x83) push, not intercepted. The nRF52840 on XIAO supports the companion firmware. This question is resolved: use companion firmware, not repeater firmware.
 
 2. **UART interface integration point in microReticulum.** Since we own RTNode-2400, the integration point is a design decision, not a feasibility question. The cleanest approach is implementing the UART interface as a new `InterfaceImpl` alongside the existing SX1280 interface within microReticulum's abstraction layer. This design should be documented and reviewed before starting Phase 3 implementation.
 
@@ -498,12 +522,12 @@ The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum annou
 
 4. **Manifest query protocol.** The spec states manifests are served as LXMF resources at `meshcore.bridge.manifest` on request. The request packet format, response format for multi-entry manifests (stream of 90-byte records vs length-prefixed list), and pagination for large manifests are not yet defined. This must be specified before Phase 5.
 
-5. **`contact_type = REPEATER` side effects.** The gateway contact is registered as type REPEATER (the closest available type) pending a BRIDGE type being added to MeshCore upstream. MeshCore's routing logic behaviour toward a REPEATER-typed contact needs to be characterised — specifically whether it affects path selection, flooding scope, or message TTL handling in unintended ways. This should be resolved before Phase 2 field testing.
+5. **`contact_type = ADV_TYPE_REPEATER` side effects.** The gateway contact is registered as `ADV_TYPE_REPEATER` (2), the closest available type. MeshCore's routing behaviour toward a REPEATER-typed contact needs to be characterised — specifically whether it affects path selection, flooding scope, or message TTL. A dedicated `ADV_TYPE_BRIDGE` should be proposed upstream. Confirm behaviour before Phase 2 field testing.
 
-6. **Hop count 0 injection via repeater serial interface.** §5.2 specifies that inbound packets are delivered with hop limit set to 0. Confirm that the repeater firmware serial interface permits construction and injection of a packet with an explicit hop count field. If it does not, the no-reflood guarantee cannot be implemented on MCU 1 without upstream MeshCore changes.
+6. **6-byte pubkey prefix resolution.** `RESP_CODE_CONTACT_MSG_RECV_V3` provides only the first 6 bytes of the sender's public key. The bridge layer resolves the full 32-byte key from the companion contacts list. If two local nodes share the same 6-byte prefix (unlikely but possible), resolution is ambiguous. Document the collision handling policy.
 
-7. **Inbound delivery to unknown local node.** If an LXMF message arrives on MCU 2 addressed to a MeshCore node that has no manifest entry, the UART interface returns error 0x02 and the message is silently dropped. Define whether a best-effort retry hold queue should be implemented on MCU 2 (hold for N minutes pending a manifest entry for that destination), or whether silent drop is acceptable.
+7. **Inbound delivery to unknown local node.** If an LXMF message arrives on MCU 2 addressed to a MeshCore node with no manifest entry, the UART interface returns error 0x02 and the message is silently dropped. Define whether a best-effort retry hold queue should be implemented on MCU 2, or whether silent drop is acceptable.
 
-8. **SPI flash failure mode.** The manifest store and inbound delivery queue both reside on the external SPI flash. If the device is unreadable at boot, MCU 2 must continue as a functional RTNode-2400 boundary node and notify MCU 1 to suppress manifest pushes. Define the detection and fallback behaviour, and add a type 0xFF error subcode for this condition.
+8. **SPI flash failure mode.** If the external SPI flash is unreadable at boot, MCU 2 must continue as a functional RTNode-2400 boundary node and notify MCU 1 to suppress manifest pushes. Define the detection and fallback behaviour, and add a type 0xFF error subcode for this condition.
 
-9. **Power budget and boot sequencing.** The 3V3 shared rail in §1.3 is noted as requiring a current budget check but no figures are given. The ESP32-S3 with SX1280 and SPI flash initialisation at boot draws significantly more than steady-state. Characterise peak current, confirm the rail can supply both MCUs simultaneously, and document the expected MCU 2 boot time so the MCU 1 retry interval (currently 30 s) can be validated as sufficient.
+9. **Power budget and boot sequencing.** The 3V3 shared rail in §1.3 requires a current budget check — no figures are given. Characterise peak current for ESP32-S3 + SX1280 + SPI flash at boot, confirm the rail can supply both MCUs simultaneously, and validate that the 30-second MCU 1 retry interval is sufficient for MCU 2 boot completion.
