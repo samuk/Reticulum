@@ -39,7 +39,9 @@ The bridge logic is split across both MCUs according to ownership. On MCU 2 we o
 | MCU 2 radio | Seeed Wio SX1280 shield | 2.4 GHz RNode interface to Reticulum backbone |
 | Interconnect | UART + RTS/CTS | MCU 1 ↔ MCU 2 bridge link |
 
-**Note on MCU 2 radio:** RTNode-2400 on XIAO ESP32-S3 uses the SX1280 operating at 2.4 GHz as its sole backbone interface (confirmed working, boundary mode verified per upstream README — the "2400" in RTNode-2400 refers to this band). WiFi is not used; all Reticulum backbone connectivity is carried over the SX1280 LoRa link. The SX1280 operates in `MODE_ACCESS_POINT` within RTNode-2400's interface abstraction. MCU 1's SX1262 operates at 868 MHz and has no RF conflict with the SX1280 on MCU 2.
+**Note on MCU 2 radio:** RTNode-2400 on XIAO ESP32-S3 uses the SX1280 operating at 2.4 GHz as its sole backbone interface. **The SX1280 variant of RTNode-2400 is currently under verification by GrayHatGuy / jrl290; the sub-GHz variants are confirmed working.** All Reticulum backbone references in this spec assume the SX1280 variant will reach the same verified status as the boundary-mode builds. Until that confirmation, treat the backbone transport as WIP. WiFi is not used; all Reticulum backbone connectivity is carried over the SX1280 LoRa link. The SX1280 operates in `MODE_ACCESS_POINT` within RTNode-2400's interface abstraction. MCU 1's SX1262 operates at 868 MHz and has no RF conflict with the SX1280 on MCU 2.
+
+**Single-MCU alternative:** GrayHatGuy has noted that the XIAO ESP32-S3 can accommodate dual SX1262 radios using the 40-pin B2B header alongside the Wio SX1262 perimeter pins, making a single-MCU implementation feasible. This would eliminate the UART bridge layer entirely, simplifying the architecture significantly. The dual-MCU design is retained here because it allows the MeshCore companion firmware to run on its native nRF52840 platform, but the single-MCU path should be evaluated in parallel.
 
 **Note on PSRAM:** The XIAO ESP32-S3 Plus Sense board has 8 MB PSRAM. RTNode-2400 boundary mode uses TLSF allocation from PSRAM when available. Use the PSRAM variant; the non-PSRAM variant has been confirmed to fall back to ~170 KB internal SRAM which is tighter.
 
@@ -145,7 +147,7 @@ If LEN > 512, emit error frame type 0xFF with error code 0x03 and return to WAIT
 | 0x02 | 32 + N bytes | 32-byte dest pubkey + decrypted payload (N ≤ 480) |
 | 0x03 | 0 bytes | Hash request carries no payload |
 | 0x04 | 16 bytes | LXMF destination hash |
-| 0x05 | 106 bytes | Manifest entry (fixed, see §5.4) |
+| 0x05 | 114 bytes | Manifest entry (fixed, see §5.4) |
 | 0x06 | 1 byte | Echo of acknowledged packet type |
 | 0xFF | 1 byte | Error code |
 
@@ -319,7 +321,7 @@ Note: `pubkey_prefix` in the companion protocol is only 6 bytes. The bridge laye
 When the companion firmware notifies the bridge layer of a newly heard or updated node via `PUSH_CODE_ADVERT` (0x80) or `PUSH_CODE_NEW_ADVERT` (0x8A), the bridge layer fetches the full contact record via `CMD_GET_CONTACTS` (0x04) and pushes a type 0x05 manifest entry to MCU 2:
 
 ```
-Type 0x05 payload (106 bytes):
+Type 0x05 payload (114 bytes):
   Byte 0:       Version = 0x01
   Bytes 1–32:   MeshCore Ed25519 public key (raw)
   Bytes 33–48:  Peer router LXMF identity hash (16 bytes) — the bridge's own identity hash
@@ -327,12 +329,21 @@ Type 0x05 payload (106 bytes):
                 for remote contacts, the peer router's identity hash from its Reticulum announce
   Bytes 49–80:  Display name / callsign (UTF-8, null-padded to 32 bytes)
   Bytes 81–84:  Last seen Unix timestamp (uint32 big-endian)
-  Bytes 85–92:  Router name / region tag (ASCII, null-padded to 8 bytes, e.g. "UK1\0\0\0\0\0")
-  Byte  93:     Propagation scope (0x00 = local, 0x01 = region, 0x02 = global; default 0x01)
-  Byte  94:     Opt-in flags (bit 0: wide-area visible, bit 1: position shared, bit 2: telemetry)
-  Bytes 95–98:  Latitude (int32 microdegrees, 0 if not opted in)
-  Bytes 99–102: Longitude (int32 microdegrees, 0 if not opted in)
-  Bytes 103–106: Position quantisation radius in metres (uint32, min 1000; recommended default 10000 = ~1km)
+  Bytes 85–100: Router name / short tag (ASCII, null-padded to 16 bytes)
+                ← CoreNet spec §5.2: tag = 1*16 chars; 16 bytes required for full compatibility
+  Byte  101:    Propagation scope (0x00 = local, 0x01 = region, 0x02 = global; default 0x01)
+  Byte  102:    Opt-in flags — bit-for-bit match with CoreNet manifest.py constants:
+                  bit 0 (0x01): OPT_IN_WIDE_AREA    — list callsign in wide-area manifests
+                  bit 1 (0x02): OPT_IN_POSITION      — include position data
+                  bit 2 (0x04): OPT_IN_TELEMETRY     — permit telemetry forwarding
+                  bit 3 (0x08): OPT_IN_RECENT_ONLY   — include only if recently active
+  Bytes 103–106: Latitude (int32 microdegrees, 0 if OPT_IN_POSITION not set)
+  Bytes 107–110: Longitude (int32 microdegrees, 0 if OPT_IN_POSITION not set)
+  Bytes 111–114: Position quantisation radius in metres (uint32)
+                 min 1000; recommended default 10000 (~1 km, matching CoreNet spec §11.3 default)
+                 Note: CoreNet §11.3 specifies precision in microdegrees (10 udeg = ~1 km);
+                 this field carries the operator-meaningful metres representation and MCU 2
+                 converts to udeg precision when building LXMF manifest responses
 ```
 
 **Primary lookup keys on MCU 2:**
@@ -452,7 +463,7 @@ MCU 2 filters the manifest by `region_tag` before responding. If `region_tag` is
 
 The contact list sequence (`ContactStart` / `Contact` / `ContactEnd`) is used when a remote bridge requests a full contact sync via `CMD_GET_CONTACTS`. Each `Contact` entry uses msgpack dict format: `{mc_type: 0x03, pubkey[32], display_name, flags, path_len, lat_udeg, lon_udeg, last_seen, region_tag}` — this supersedes the 106-byte flat binary struct as the on-wire manifest format for inter-bridge communication. The 106-byte struct remains the MCU 1 ↔ MCU 2 UART format; MCU 2 translates to/from msgpack when serving remote bridges.
 
-**On-disk format:** 106 bytes per entry (type 0x05 struct), flat array on SPI flash. Configurable cap of 512 entries (~54 KB) to bound query response time.
+**On-disk format:** 114 bytes per entry (type 0x05 struct), flat array on SPI flash. Configurable cap of 512 entries (~58 KB) to bound query response time.
 
 **Manifest signing:** MCU 2 signs the serialised manifest response with its Reticulum identity private key. Remote bridges verify against the bridge's public key from the Reticulum announce.
 
@@ -466,7 +477,7 @@ The carrier board provides 8 MB of SPI flash accessible to the ESP32-S3 via SPI.
 
 | Region | Size | Contents |
 |---|---|---|
-| Manifest store | 1 MB | Contact manifest + LXMF→pubkey lookup table (106 bytes × up to 9,930 entries) |
+| Manifest store | 1 MB | Contact manifest + router registry (114 bytes × up to 9,200 entries) |
 | Inbound delivery queue | 6 MB | Per-destination packet queue for 868 MHz rate limiting — see §6.5 |
 | Reserved | 1 MB | Future use |
 
@@ -623,3 +634,7 @@ The UART interface must use `MODE_ACCESS_POINT` so that backbone Reticulum annou
 16. **SPI flash failure mode.** If the external SPI flash is unreadable at boot, MCU 2 must continue as a functional RTNode-2400 boundary node and notify MCU 1 via a type 0xFF error subcode. Define detection and fallback behaviour.
 
 17. **Power budget and boot sequencing.** The 3V3 shared rail in §1.3 requires current budget verification. Characterise peak current for ESP32-S3 + SX1280 + SPI flash at boot, confirm the rail can supply both MCUs simultaneously, and validate that the 30-second MCU 1 retry interval covers MCU 2 boot completion.
+
+18. **Manifest signing scope — federation protocol vs implementation.** §6.3 specifies that MCU 2 signs manifest responses with its Reticulum identity private key. Art Botterell (KD6O) has noted this is more concrete than CoreNet's current "manifests are signed" hand-wave, and raises the open question of whether signing mechanics belong in the federation protocol spec or are legitimately implementation territory where different targets may differ. This spec's position is that Reticulum identity signing is the natural choice for an embedded Reticulum node, but the wire format for the signature and the verification procedure should be coordinated with CoreNet before field deployment to ensure interoperability with software-daemon bridge implementations.
+
+19. **Single-MCU architecture evaluation.** GrayHatGuy has identified that a single XIAO ESP32-S3 with dual SX1262 radios (B2B header + perimeter pins) could implement the full bridge in one MCU, eliminating the UART layer. This should be prototyped alongside the dual-MCU design. Key trade-off: single-MCU loses the clean separation between MeshCore companion firmware and the Reticulum stack, and requires the MeshCore companion layer to run on ESP32-S3 instead of nRF52840. Evaluate feasibility before committing to v4 hardware.
