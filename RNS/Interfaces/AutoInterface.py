@@ -65,7 +65,7 @@ class AutoInterface(Interface):
 
     ALL_IGNORE_IFS     = ["lo0"]
     DARWIN_IGNORE_IFS  = ["awdl0", "llw0", "lo0", "en5"]
-    ANDROID_IGNORE_IFS = ["dummy0", "lo", "tun0"]
+    ANDROID_IGNORE_IFS = ["dummy0", "lo", "tun0", "rmnet0", "rmnet1", "rmnet2", "rmnet3", "rmnet4", "rmnet5", "rmnet6", "rmnet7"]
 
     BITRATE_GUESS      = 10*1000*1000
 
@@ -530,6 +530,21 @@ class AutoInterface(Interface):
                 spawned_interface = AutoInterfacePeer(self, addr, ifname)
                 spawned_interface.OUT = self.OUT
                 spawned_interface.IN  = self.IN
+
+                spawned_interface.ingress_control = self.ingress_control
+                spawned_interface.ic_max_held_announces = self.ic_max_held_announces
+                spawned_interface.ic_burst_hold = self.ic_burst_hold
+                spawned_interface.ic_burst_freq = self.ic_burst_freq
+                spawned_interface.ic_burst_freq_new = self.ic_burst_freq_new
+                spawned_interface.ic_new_time = self.ic_new_time
+                spawned_interface.ic_burst_penalty = self.ic_burst_penalty
+                spawned_interface.ic_held_release_interval = self.ic_held_release_interval
+
+                spawned_interface.egress_control = self.egress_control
+                spawned_interface.ec_pr_freq = self.ec_pr_freq
+                spawned_interface.ic_pr_burst_freq_new = self.ic_pr_burst_freq_new
+                spawned_interface.ic_pr_burst_freq = self.ic_pr_burst_freq
+                
                 spawned_interface.parent_interface = self
                 spawned_interface.bitrate = self.bitrate
                 
@@ -559,7 +574,7 @@ class AutoInterface(Interface):
                 spawned_interface.mode = self.mode
                 spawned_interface.HW_MTU = self.HW_MTU
                 spawned_interface.online = True
-                RNS.Transport.interfaces.append(spawned_interface)
+                RNS.Transport.add_interface(spawned_interface)
                 if addr in self.spawned_interfaces:
                     self.spawned_interfaces[addr].detach()
                     self.spawned_interfaces[addr].teardown()
@@ -651,7 +666,7 @@ class AutoInterfacePeer(Interface):
             except Exception as e:
                 RNS.log(f"Could not remove {self} from parent interface on detach. The contained exception was: {e}", RNS.LOG_ERROR)
 
-        if self in RNS.Transport.interfaces: RNS.Transport.interfaces.remove(self)
+        RNS.Transport.remove_interface(self)
 
 class AutoInterfaceHandler(socketserver.BaseRequestHandler):
     def __init__(self, callback, *args, **keys):

@@ -826,9 +826,8 @@ class I2PInterfacePeer(Interface):
             while self in self.parent_interface.spawned_interfaces:
                 self.parent_interface.spawned_interfaces.remove(self)
 
-        if self in RNS.Transport.interfaces:
-            if not self.initiator:
-                RNS.Transport.interfaces.remove(self)
+        if not self.initiator:
+            RNS.Transport.remove_interface(self)
 
 
     def __str__(self):
@@ -940,7 +939,7 @@ class I2PInterface(Interface):
                 peer_interface.IN  = True
                 peer_interface.parent_interface = self
                 peer_interface.parent_count = False
-                RNS.Transport.interfaces.append(peer_interface)
+                RNS.Transport.add_interface(peer_interface)
 
     def incoming_connection(self, handler):
         RNS.log("Accepting incoming I2P connection", RNS.LOG_VERBOSE)
@@ -948,6 +947,21 @@ class I2PInterface(Interface):
         spawned_interface = I2PInterfacePeer(self, self.owner, interface_name, connected_socket=handler.request)
         spawned_interface.OUT = True
         spawned_interface.IN  = True
+
+        spawned_interface.ingress_control = self.ingress_control
+        spawned_interface.ic_max_held_announces = self.ic_max_held_announces
+        spawned_interface.ic_burst_hold = self.ic_burst_hold
+        spawned_interface.ic_burst_freq = self.ic_burst_freq
+        spawned_interface.ic_burst_freq_new = self.ic_burst_freq_new
+        spawned_interface.ic_new_time = self.ic_new_time
+        spawned_interface.ic_burst_penalty = self.ic_burst_penalty
+        spawned_interface.ic_held_release_interval = self.ic_held_release_interval
+
+        spawned_interface.egress_control = self.egress_control
+        spawned_interface.ec_pr_freq = self.ec_pr_freq
+        spawned_interface.ic_pr_burst_freq_new = self.ic_pr_burst_freq_new
+        spawned_interface.ic_pr_burst_freq = self.ic_pr_burst_freq
+        
         spawned_interface.parent_interface = self
         spawned_interface.online = True
         spawned_interface.bitrate = self.bitrate
@@ -978,7 +992,7 @@ class I2PInterface(Interface):
         spawned_interface.mode = self.mode
         spawned_interface.HW_MTU = self.HW_MTU
         RNS.log("Spawned new I2PInterface Peer: "+str(spawned_interface), RNS.LOG_VERBOSE)
-        RNS.Transport.interfaces.append(spawned_interface)
+        RNS.Transport.add_interface(spawned_interface)
         while spawned_interface in self.spawned_interfaces:
             self.spawned_interfaces.remove(spawned_interface)
         self.spawned_interfaces.append(spawned_interface)
@@ -992,6 +1006,12 @@ class I2PInterface(Interface):
 
     def sent_announce(self, from_spawned=False):
         if from_spawned: self.oa_freq_deque.append(time.time())
+
+    def received_path_request(self, from_spawned=False):
+        if from_spawned: self.ip_freq_deque.append(time.time())
+
+    def sent_path_request(self, from_spawned=False):
+        if from_spawned: self.op_freq_deque.append(time.time())
 
     def detach(self):
         RNS.log("Detaching "+str(self), RNS.LOG_DEBUG)

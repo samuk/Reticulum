@@ -47,6 +47,7 @@ else:
     from RNS.Interfaces import *
 
 from RNS.vendor.configobj import ConfigObj
+from threading import Lock
 import configparser
 import multiprocessing.connection
 import importlib.util
@@ -102,12 +103,8 @@ class Reticulum:
 
     LINK_MTU_DISCOVERY   = True
     """
-    Whether automatic link MTU discovery is enabled by default in this
-    release. Link MTU discovery significantly increases throughput over
-    fast links, but requires all intermediary hops to also support it.
-    Support for this feature was added in RNS version 0.9.0. This option
-    will become enabled by default in the near future. Please update your
-    RNS instances.
+    Whether automatic link MTU discovery is enabled by default. Link MTU
+    discovery significantly increases throughput over fast links.
     """
 
     MAX_QUEUED_ANNOUNCES = 16384
@@ -171,6 +168,8 @@ class Reticulum:
     cachepath        = ""
     interfacepath    = ""
 
+    gracious_persist_lock = Lock()
+
     __instance       = None
 
     __interface_detach_ran = False
@@ -183,15 +182,14 @@ class Reticulum:
         # out cleanup operations.
         if not Reticulum.__exit_handler_ran:
             Reticulum.__exit_handler_ran = True
-            if not Reticulum.__interface_detach_ran:
-                RNS.Transport.detach_interfaces()
+            if not Reticulum.__interface_detach_ran: RNS.Transport.detach_interfaces()
             RNS.Transport.exit_handler()
             RNS.Identity.exit_handler()
 
-            if RNS.Profiler.ran():
-                RNS.Profiler.results()
+            if RNS.Profiler.ran(): RNS.Profiler.results()
 
-            RNS.loglevel = -1
+            RNS.loglevel = RNS.LOG_NONE
+            RNS._detach_stdout()
 
     @staticmethod
     def sigint_handler(signal, frame):
@@ -238,7 +236,7 @@ class Reticulum:
 
         if logdest == RNS.LOG_FILE:
             RNS.logdest = RNS.LOG_FILE
-            RNS.logfile = Reticulum.configdir+"/logfile"
+            RNS.logfile = RNS.logfile or Reticulum.configdir+"/logfile"
         elif callable(logdest):
             RNS.logdest = RNS.LOG_CALLBACK
             RNS.logcall = logdest
@@ -251,19 +249,33 @@ class Reticulum:
         Reticulum.blackholepath = Reticulum.configdir+"/storage/blackhole"
         Reticulum.interfacepath = Reticulum.configdir+"/interfaces"
 
-        Reticulum.__network_identity = None
-        Reticulum.__transport_enabled = False
-        Reticulum.__link_mtu_discovery = Reticulum.LINK_MTU_DISCOVERY
-        Reticulum.__remote_management_enabled = False
-        Reticulum.__use_implicit_proof = True
-        Reticulum.__allow_probes = False
-        Reticulum.__discovery_enabled = False
-        Reticulum.__discover_interfaces = False
+        Reticulum.__network_identity                  = None
+        Reticulum.__transport_enabled                 = False
+        Reticulum.__link_mtu_discovery                = Reticulum.LINK_MTU_DISCOVERY
+        Reticulum.__remote_management_enabled         = False
+        Reticulum.__use_implicit_proof                = True
+        Reticulum.__allow_probes                      = False
+        Reticulum.__discovery_enabled                 = False
+        Reticulum.__discover_interfaces               = False
         Reticulum.__autoconnect_discovered_interfaces = False
-        Reticulum.__required_discovery_value = None
-        Reticulum.__publish_blackhole = False
-        Reticulum.__blackhole_sources = []
-        Reticulum.__interface_sources = []
+        Reticulum.__required_discovery_value          = None
+        Reticulum.__publish_blackhole                 = False
+        Reticulum.__blackhole_sources                 = []
+        Reticulum.__interface_sources                 = []
+        Reticulum.__default_ar_target                 = None
+        Reticulum.__default_ar_penalty                = None
+        Reticulum.__default_ar_grace                  = None
+        Reticulum.__ic_max_held_announces             = None
+        Reticulum.__ic_burst_hold                     = None
+        Reticulum.__ic_burst_freq_new                 = None
+        Reticulum.__ic_burst_freq                     = None
+        Reticulum.__ic_pr_burst_freq_new              = None
+        Reticulum.__ic_pr_burst_freq                  = None
+        Reticulum.__ic_new_time                       = None
+        Reticulum.__ic_burst_penalty                  = None
+        Reticulum.__ic_held_release_interval          = None
+        Reticulum.__ec_pr_freq                        = None
+        Reticulum.__egress_control                    = None
 
         Reticulum.panic_on_interface_error = False
 
@@ -322,6 +334,7 @@ class Reticulum:
         RNS.log(f"Configuration loaded from {self.configpath}", RNS.LOG_VERBOSE)
 
         RNS.Identity.load_known_destinations()
+        if not self.is_connected_to_shared_instance: RNS.Identity._clean_ratchets()
         RNS.Transport.start(self)
 
         if self.use_af_unix:
@@ -351,7 +364,6 @@ class Reticulum:
 
     def __start_jobs(self):
         if self.jobs_thread == None:
-            RNS.Identity._clean_ratchets()
             self.jobs_thread = threading.Thread(target=self.__jobs)
             self.jobs_thread.daemon = True
             self.jobs_thread.start()
@@ -361,11 +373,11 @@ class Reticulum:
             now = time.time()
 
             if now > self.last_cache_clean+Reticulum.CLEAN_INTERVAL:
-                self.__clean_caches()
+                self.__clean_caches(background=True)
                 self.last_cache_clean = time.time()
 
             if now > self.last_data_persist+Reticulum.PERSIST_INTERVAL:
-                self.__persist_data()
+                self.__persist_data(background=True)
             
             time.sleep(Reticulum.JOB_INTERVAL)
 
@@ -390,7 +402,7 @@ class Reticulum:
                     RNS.log("Existing shared instance required, but this instance started as shared instance. Aborting startup.", RNS.LOG_VERBOSE)
 
                 else:
-                    RNS.Transport.interfaces.append(interface)
+                    RNS.Transport.add_interface(interface)
                     self.shared_instance_interface = interface
                     self.is_shared_instance = True
                     RNS.log("Started shared instance interface: "+str(interface), RNS.LOG_DEBUG)
@@ -410,7 +422,7 @@ class Reticulum:
                         interface._force_bitrate = True
                         RNS.log(f"Forcing shared instance bitrate of {RNS.prettyspeed(interface.bitrate)}", RNS.LOG_WARNING)
                         interface.optimise_mtu()
-                    RNS.Transport.interfaces.append(interface)
+                    RNS.Transport.add_interface(interface)
                     self.is_shared_instance = False
                     self.is_standalone_instance = False
                     self.is_connected_to_shared_instance = True
@@ -581,6 +593,64 @@ class Reticulum:
                 if option == "autoconnect_discovered_interfaces":
                     v = self.config["reticulum"].as_int(option)
                     if v > 0: Reticulum.__autoconnect_discovered_interfaces = v
+                
+                if option == "default_ar_target":
+                    v = self.config["reticulum"].as_int(option)
+                    if   v == 0: Reticulum.__default_ar_target = None
+                    elif v >  0: Reticulum.__default_ar_target = v
+                
+                if option == "default_ar_penalty":
+                    v = self.config["reticulum"].as_int(option)
+                    if v >= 0: Reticulum.__default_ar_penalty = v
+                
+                if option == "default_ar_grace":
+                    v = self.config["reticulum"].as_int(option)
+                    if v >= 0: Reticulum.__default_ar_grace = v
+
+                if option == "ic_max_held_announces":
+                    v = self.config["reticulum"].as_int(option)
+                    if v >= 0: Reticulum.__ic_max_held_announces = v
+                
+                if option == "ic_burst_hold":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ic_burst_hold = v
+                
+                if option == "ic_burst_freq_new":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ic_burst_freq_new = v
+                
+                if option == "ic_burst_freq":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ic_burst_freq = v
+                
+                if option == "ic_pr_burst_freq_new":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ic_pr_burst_freq_new = v
+                
+                if option == "ic_pr_burst_freq":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ic_pr_burst_freq = v
+
+                if option == "ec_pr_freq":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ec_pr_freq = v
+
+                if option == "egress_control":
+                    v = self.config["reticulum"].as_bool(option)
+                    if v >= 0: Reticulum.__egress_control = v
+                
+                if option == "ic_new_time":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ic_new_time = v
+                
+                if option == "ic_burst_penalty":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ic_burst_penalty = v
+                
+                if option == "ic_held_release_interval":
+                    v = self.config["reticulum"].as_float(option)
+                    if v >= 0: Reticulum.__ic_held_release_interval = v
+
 
         if RNS.compiled: RNS.log("Reticulum running in compiled mode", RNS.LOG_DEBUG)
         else: RNS.log("Reticulum running in interpreted mode", RNS.LOG_DEBUG)
@@ -669,6 +739,8 @@ class Reticulum:
                 
         ingress_control = True
         if "ingress_control" in c: ingress_control = c.as_bool("ingress_control")
+        egress_control = None
+        if "egress_control" in c: egress_control = c.as_bool("egress_control")
         ic_max_held_announces = None
         if "ic_max_held_announces" in c: ic_max_held_announces = c.as_int("ic_max_held_announces")
         ic_burst_hold = None
@@ -677,6 +749,12 @@ class Reticulum:
         if "ic_burst_freq_new" in c: ic_burst_freq_new = c.as_float("ic_burst_freq_new")
         ic_burst_freq = None
         if "ic_burst_freq" in c: ic_burst_freq = c.as_float("ic_burst_freq")
+        ic_pr_burst_freq_new = None
+        if "ic_pr_burst_freq_new" in c: ic_pr_burst_freq_new = c.as_float("ic_pr_burst_freq_new")
+        ic_pr_burst_freq = None
+        if "ic_pr_burst_freq" in c: ic_pr_burst_freq = c.as_float("ic_pr_burst_freq")
+        ec_pr_freq = None
+        if "ec_pr_freq" in c: ec_pr_freq = c.as_float("ec_pr_freq")
         ic_new_time = None
         if "ic_new_time" in c: ic_new_time = c.as_float("ic_new_time")
         ic_burst_penalty = None
@@ -720,6 +798,11 @@ class Reticulum:
 
         ignore_config_warnings = False
         if "ignore_config_warnings" in c: ignore_config_warnings = c.as_bool("ignore_config_warnings")
+
+        if Reticulum.transport_enabled():
+            if announce_rate_target  == None: announce_rate_target  = self._default_ar_target()
+            if announce_rate_penalty == None: announce_rate_penalty = self._default_ar_penalty()
+            if announce_rate_grace   == None: announce_rate_grace   = self._default_ar_grace()
 
         discoverable = False
         discovery_announce_interval = None
@@ -797,10 +880,14 @@ class Reticulum:
                     interface.announce_rate_grace = announce_rate_grace
                     interface.announce_rate_penalty = announce_rate_penalty
                     interface.ingress_control = ingress_control
+                    if egress_control != None: interface.egress_control = egress_control
                     if ic_max_held_announces != None: interface.ic_max_held_announces = ic_max_held_announces
                     if ic_burst_hold != None: interface.ic_burst_hold = ic_burst_hold
                     if ic_burst_freq_new != None: interface.ic_burst_freq_new = ic_burst_freq_new
                     if ic_burst_freq != None: interface.ic_burst_freq = ic_burst_freq
+                    if ic_pr_burst_freq_new != None: interface.ic_pr_burst_freq_new = ic_pr_burst_freq_new
+                    if ic_pr_burst_freq != None: interface.ic_pr_burst_freq = ic_pr_burst_freq
+                    if ec_pr_freq != None: interface.ec_pr_freq = ec_pr_freq
                     if ic_new_time != None: interface.ic_new_time = ic_new_time
                     if ic_burst_penalty != None: interface.ic_burst_penalty = ic_burst_penalty
                     if ic_held_release_interval != None: interface.ic_held_release_interval = ic_held_release_interval
@@ -828,7 +915,7 @@ class Reticulum:
                         interface.ifac_identity = RNS.Identity.from_bytes(interface.ifac_key)
                         interface.ifac_signature = interface.ifac_identity.sign(RNS.Identity.full_hash(interface.ifac_key))
 
-                    RNS.Transport.interfaces.append(interface)
+                    RNS.Transport.add_interface(interface)
                     interface.final_init()
 
             interface = None
@@ -960,7 +1047,7 @@ class Reticulum:
                 interface.optimise_mtu()
 
                 if ifac_size != None: interface.ifac_size = ifac_size
-                else: interface.ifac_size = 8
+                else:                 interface.ifac_size = interface.DEFAULT_IFAC_SIZE
 
                 interface.announce_cap = announce_cap if announce_cap != None else Reticulum.ANNOUNCE_CAP/100.0
                 interface.announce_rate_target = announce_rate_target
@@ -990,19 +1077,65 @@ class Reticulum:
                     interface.ifac_identity = RNS.Identity.from_bytes(interface.ifac_key)
                     interface.ifac_signature = interface.ifac_identity.sign(RNS.Identity.full_hash(interface.ifac_key))
 
-                RNS.Transport.interfaces.append(interface)
+                RNS.Transport.add_interface(interface)
                 interface.final_init()
 
-    def _should_persist_data(self):
+    def _default_ar_target(self):
+        return self.__default_ar_target or RNS.Interfaces.Interface.Interface.DEFAULT_AR_TARGET
+
+    def _default_ar_penalty(self):
+        return self.__default_ar_penalty or RNS.Interfaces.Interface.Interface.DEFAULT_AR_PENALTY
+
+    def _default_ar_grace(self):
+        return self.__default_ar_grace or RNS.Interfaces.Interface.Interface.DEFAULT_AR_GRACE
+
+    def _default_ic_max_held_announces(self):
+        return self.__ic_max_held_announces or RNS.Interfaces.Interface.Interface.MAX_HELD_ANNOUNCES
+
+    def _default_ic_burst_hold(self):
+        return self.__ic_burst_hold or RNS.Interfaces.Interface.Interface.IC_BURST_HOLD
+
+    def _default_ic_burst_freq_new(self):
+        return self.__ic_burst_freq_new or RNS.Interfaces.Interface.Interface.IC_BURST_FREQ_NEW
+
+    def _default_ic_burst_freq(self):
+        return self.__ic_burst_freq or RNS.Interfaces.Interface.Interface.IC_BURST_FREQ
+
+    def _default_ic_pr_burst_freq_new(self):
+        return self.__ic_pr_burst_freq_new or RNS.Interfaces.Interface.Interface.IC_PR_BURST_FREQ_NEW
+
+    def _default_ic_pr_burst_freq(self):
+        return self.__ic_pr_burst_freq or RNS.Interfaces.Interface.Interface.IC_PR_BURST_FREQ
+
+    def _default_ec_pr_freq(self):
+        return self.__ec_pr_freq or RNS.Interfaces.Interface.Interface.EC_PR_FREQ
+
+    def _default_egress_control(self):
+        return self.__egress_control or RNS.Interfaces.Interface.Interface.EGRESS_CONTROL
+
+    def _default_ic_new_time(self):
+        return self.__ic_new_time or RNS.Interfaces.Interface.Interface.IC_NEW_TIME
+
+    def _default_ic_burst_penalty(self):
+        return self.__ic_burst_penalty or RNS.Interfaces.Interface.Interface.IC_BURST_PENALTY
+
+    def _default_ic_held_release_interval(self):
+        return self.__ic_held_release_interval or RNS.Interfaces.Interface.Interface.IC_HELD_RELEASE_INTERVAL
+
+    def _should_persist_data(self, background=False):
         if time.time() > self.last_data_persist+Reticulum.GRACIOUS_PERSIST_INTERVAL:
-            self.__persist_data()
+            def job(): self.__persist_data(background=background)
+            if background: threading.Thread(target=job, daemon=True).start()
+            else:          job()
 
-    def __persist_data(self):
-        RNS.Transport.persist_data()
-        RNS.Identity.persist_data()
-        self.last_data_persist = time.time()
+    def __persist_data(self, background=False):
+        if Reticulum.gracious_persist_lock.locked(): return
+        with Reticulum.gracious_persist_lock:
+            RNS.Transport.persist_data(background=background)
+            RNS.Identity.persist_data(background=background)
+            self.last_data_persist = time.time()
 
-    def __clean_caches(self):
+    def __clean_caches(self, background=False):
         RNS.log("Cleaning resource and packet caches...", RNS.LOG_EXTREME)
         now = time.time()
 
@@ -1013,8 +1146,8 @@ class Reticulum:
                     filepath = self.resourcepath + "/" + filename
                     mtime = os.path.getmtime(filepath)
                     age = now - mtime
-                    if age > Reticulum.RESOURCE_CACHE:
-                        os.unlink(filepath)
+                    if age > Reticulum.RESOURCE_CACHE: os.unlink(filepath)
+                    if background: time.sleep(0.001)
 
             except Exception as e:
                 RNS.log("Error while cleaning resources cache, the contained exception was: "+str(e), RNS.LOG_ERROR)
@@ -1026,8 +1159,8 @@ class Reticulum:
                     filepath = self.cachepath + "/" + filename
                     mtime = os.path.getmtime(filepath)
                     age = now - mtime
-                    if age > RNS.Transport.DESTINATION_TIMEOUT:
-                        os.unlink(filepath)
+                    if age > RNS.Transport.DESTINATION_TIMEOUT: os.unlink(filepath)
+                    if background: time.sleep(0.001)
             
             except Exception as e:
                 RNS.log("Error while cleaning resources cache, the contained exception was: "+str(e), RNS.LOG_ERROR)
@@ -1041,7 +1174,7 @@ class Reticulum:
         self.config.write()
 
     def rpc_loop(self):
-        while True:
+        while RNS.Transport._should_run:
             try:
                 rpc_connection = self.rpc_listener.accept()
                 call = rpc_connection.recv()
@@ -1080,12 +1213,83 @@ class Reticulum:
                     identity_hash = call["unblackhole_identity"]
                     rpc_connection.send(self.unblackhole_identity(identity_hash))
 
+                if "destination_data" in call:
+                    operation = call["destination_data"]
+                    destination_hash = call["destination_hash"]
+                    if   operation == "used":     rpc_connection.send(self._used_destination_data(destination_hash))
+                    elif operation == "retain":   rpc_connection.send(self._retain_destination_data(destination_hash))
+                    elif operation == "unretain": rpc_connection.send(self._unretain_destination_data(destination_hash))
+
+                if "identity_data" in call:
+                    operation = call["identity_data"]
+                    identity_hash = call["identity_hash"]
+                    if operation == "retain": rpc_connection.send(self._retain_identity(identity_hash))
+
                 rpc_connection.close()
 
             except Exception as e:
                 RNS.log("An error ocurred while handling RPC call from local client: "+str(e), RNS.LOG_ERROR)
 
     def get_rpc_client(self): return multiprocessing.connection.Client(self.rpc_addr, family=self.rpc_type, authkey=self.rpc_key)
+
+    def _used_destination_data(self, destination_hash):
+        if self.is_connected_to_shared_instance:
+            try:
+                rpc_connection = self.get_rpc_client()
+                rpc_connection.send({"destination_data": "used", "destination_hash": destination_hash})
+                response = rpc_connection.recv()
+                return response
+
+            except Exception as e:
+                RNS.log(f"Shared instance RPC failed while setting destination data use: {e}", RNS.LOG_ERROR)
+                return False
+        
+        else: return RNS.Identity._used_destination_data(destination_hash)
+
+    def _retain_destination_data(self, destination_hash):
+        if self.is_connected_to_shared_instance:
+            try:
+                rpc_connection = self.get_rpc_client()
+                rpc_connection.send({"destination_data": "retain", "destination_hash": destination_hash})
+                response = rpc_connection.recv()
+                return response
+
+            except Exception as e:
+                RNS.log(f"Shared instance RPC failed while retaining destination data: {e}", RNS.LOG_ERROR)
+                return False
+        
+        else: return RNS.Identity._retain_destination_data(destination_hash)
+
+    def _unretain_destination_data(self, destination_hash):
+        if self.is_connected_to_shared_instance:
+            try:
+                rpc_connection = self.get_rpc_client()
+                rpc_connection.send({"destination_data": "unretain", "destination_hash": destination_hash})
+                response = rpc_connection.recv()
+                return response
+
+            except Exception as e:
+                RNS.log(f"Shared instance RPC failed while unretaining destination data: {e}", RNS.LOG_ERROR)
+                return False
+        
+        else: return RNS.Identity._unretain_destination_data(destination_hash)
+
+    def _retain_identity(self, identity_hash):
+        if type(identity_hash) != bytes or len(identity_hash) != RNS.Reticulum.TRUNCATED_HASHLENGTH//8:
+            raise TypeError("Cannot retain identity, not a valid identity hash")
+
+        if self.is_connected_to_shared_instance:
+            try:
+                rpc_connection = self.get_rpc_client()
+                rpc_connection.send({"identity_data": "retain", "identity_hash": identity_hash})
+                response = rpc_connection.recv()
+                return response
+
+            except Exception as e:
+                RNS.log(f"Shared instance RPC failed while retaining identity: {e}", RNS.LOG_ERROR)
+                return False
+        
+        else: return RNS.Identity._retain_identity(identity_hash)
 
     def get_interface_stats(self):
         if self.is_connected_to_shared_instance:
@@ -1238,7 +1442,16 @@ class Reticulum:
                 ifstats["txb"] = interface.txb
                 ifstats["incoming_announce_frequency"] = interface.incoming_announce_frequency()
                 ifstats["outgoing_announce_frequency"] = interface.outgoing_announce_frequency()
+                ifstats["incoming_pr_frequency"] = interface.incoming_pr_frequency()
+                ifstats["outgoing_pr_frequency"] = interface.outgoing_pr_frequency()
+                ifstats["announce_rate_target"] = interface.announce_rate_target
+                ifstats["announce_rate_penalty"] = interface.announce_rate_penalty
+                ifstats["announce_rate_grace"] = interface.announce_rate_grace
                 ifstats["held_announces"] = len(interface.held_announces)
+                ifstats["burst_active"] = interface.ic_burst_active
+                ifstats["burst_activated"] = interface.ic_burst_activated
+                ifstats["pr_burst_active"] = interface.ic_pr_burst_active
+                ifstats["pr_burst_activated"] = interface.ic_pr_burst_activated
                 ifstats["status"] = interface.online
                 ifstats["mode"] = interface.mode
 

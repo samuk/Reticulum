@@ -428,6 +428,7 @@ class RNodeInterface(Interface):
         thread = threading.Thread(target=self.readLoop)
         thread.daemon = True
         thread.start()
+        sleep(1.0)
 
         self.detect()
         if self.use_tcp:

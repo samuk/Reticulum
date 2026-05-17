@@ -27,6 +27,7 @@ clean:
 purge_docs:
 	@echo Purging documentation build...
 	@-rm -rf ./docs/manual
+	@-rm -rf ./docs/markdown
 	@-rm -rf ./docs/*.pdf
 	@-rm -rf ./docs/*.epub
 
@@ -50,7 +51,7 @@ build_pure_wheel:
 	python3 setup.py bdist_wheel --pure
 
 documentation:
-	make -C docs html
+	make -C docs html markdown
 
 manual:
 	make -C docs latexpdf epub
@@ -61,9 +62,18 @@ release: test remove_symlinks build_sdist build_wheel build_pure_wheel documenta
 
 debug: remove_symlinks build_wheel build_pure_wheel create_symlinks
 
-upload:
-	@echo Ready to publish release, hit enter to continue
+upload: upload-rns upload-rnspure
+
+upload-rns:
+	@echo Ready to publish rns release, hit enter to continue
 	@read VOID
 	@echo Uploading to PyPi...
-	twine upload dist/*
+	twine upload dist/rns-*.whl dist/rns-*.tar.gz
+	@echo Release published
+
+upload-rnspure:
+	@echo Ready to publish rnspure release, hit enter to continue
+	@read VOID
+	@echo Uploading to PyPi...
+	twine upload dist/rnspure-*.whl
 	@echo Release published

@@ -722,12 +722,9 @@ class Link:
             pass
 
     def link_closed(self):
-        for resource in self.incoming_resources:
-            resource.cancel()
-        for resource in self.outgoing_resources:
-            resource.cancel()
-        if self._channel:
-            self._channel._shutdown()
+        for resource in self.incoming_resources: resource.cancel()
+        for resource in self.outgoing_resources: resource.cancel()
+        if self._channel: self._channel._shutdown()
             
         self.prv = None
         self.pub = None
@@ -741,8 +738,7 @@ class Link:
                     self.destination.links.remove(self)
 
         if self.callbacks.link_closed != None:
-            try:
-                self.callbacks.link_closed(self)
+            try: self.callbacks.link_closed(self)
             except Exception as e:
                 RNS.log("Error while executing link closed callback from "+str(self)+". The contained exception was: "+str(e), RNS.LOG_ERROR)
 
@@ -1181,7 +1177,7 @@ class Link:
                         resource_hash = packet.data[0:RNS.Identity.HASHLENGTH//8]
                         for resource in self.outgoing_resources:
                             if resource_hash == resource.hash:
-                                def job(): resource.validate_proof(packet.data)
+                                def job(resource=resource): resource.validate_proof(packet.data)
                                 threading.Thread(target=job, daemon=True).start()
                                 self.__update_phy_stats(packet, query_shared=True)
 
@@ -1300,10 +1296,8 @@ class Link:
         :param resource_strategy: One of ``RNS.Link.ACCEPT_NONE``, ``RNS.Link.ACCEPT_ALL`` or ``RNS.Link.ACCEPT_APP``. If ``RNS.Link.ACCEPT_APP`` is set, the `resource_callback` will be called to determine whether the resource should be accepted or not.
         :raises: *TypeError* if the resource strategy is unsupported.
         """
-        if not resource_strategy in Link.resource_strategies:
-            raise TypeError("Unsupported resource strategy")
-        else:
-            self.resource_strategy = resource_strategy
+        if not resource_strategy in Link.resource_strategies: raise TypeError("Unsupported resource strategy")
+        else: self.resource_strategy = resource_strategy
 
     def register_outgoing_resource(self, resource):
         self.outgoing_resources.append(resource)
@@ -1313,8 +1307,7 @@ class Link:
 
     def has_incoming_resource(self, resource):
         for incoming_resource in self.incoming_resources:
-            if incoming_resource.hash == resource.hash:
-                return True
+            if incoming_resource.hash == resource.hash: return True
 
         return False
 
@@ -1325,25 +1318,18 @@ class Link:
         return self.last_resource_eifr
 
     def cancel_outgoing_resource(self, resource):
-        if resource in self.outgoing_resources:
-            self.outgoing_resources.remove(resource)
-        else:
-            RNS.log("Attempt to cancel a non-existing outgoing resource", RNS.LOG_ERROR)
+        if resource in self.outgoing_resources: self.outgoing_resources.remove(resource)
+        else: RNS.log("Attempt to cancel a non-existing outgoing resource", RNS.LOG_WARNING)
 
     def cancel_incoming_resource(self, resource):
-        if resource in self.incoming_resources:
-            self.incoming_resources.remove(resource)
-        else:
-            RNS.log("Attempt to cancel a non-existing incoming resource", RNS.LOG_ERROR)
+        if resource in self.incoming_resources: self.incoming_resources.remove(resource)
+        else: RNS.log("Attempt to cancel a non-existing incoming resource", RNS.LOG_WARNING)
 
     def ready_for_new_resource(self):
-        if len(self.outgoing_resources) > 0:
-            return False
-        else:
-            return True
+        if len(self.outgoing_resources) > 0: return False
+        else:                                return True
 
-    def __str__(self):
-        return RNS.prettyhexrep(self.link_id)
+    def __str__(self): return RNS.prettyhexrep(self.link_id)
 
 
 class RequestReceipt():

@@ -403,7 +403,7 @@ class TCPClientInterface(Interface):
                         RNS.log("The socket for "+str(self)+" was closed, attempting to reconnect...", RNS.LOG_WARNING)
                         self.reconnect()
                     else:
-                        RNS.log("The socket for remote client "+str(self)+" was closed.", RNS.LOG_VERBOSE)
+                        RNS.log("The socket for remote client "+str(self)+" was closed.", RNS.LOG_DEBUG)
                         self.teardown()
 
                     break
@@ -436,9 +436,8 @@ class TCPClientInterface(Interface):
             while self in self.parent_interface.spawned_interfaces:
                 self.parent_interface.spawned_interfaces.remove(self)
 
-        if self in RNS.Transport.interfaces:
-            if not self.initiator:
-                RNS.Transport.interfaces.remove(self)
+        if not self.initiator:
+            RNS.Transport.remove_interface(self)
 
 
     def __str__(self):
@@ -579,6 +578,21 @@ class TCPServerInterface(Interface):
         spawned_interface = TCPClientInterface(self.owner, spawned_configuration, connected_socket=handler.request)
         spawned_interface.OUT = self.OUT
         spawned_interface.IN  = self.IN
+        
+        spawned_interface.ingress_control = self.ingress_control
+        spawned_interface.ic_max_held_announces = self.ic_max_held_announces
+        spawned_interface.ic_burst_hold = self.ic_burst_hold
+        spawned_interface.ic_burst_freq = self.ic_burst_freq
+        spawned_interface.ic_burst_freq_new = self.ic_burst_freq_new
+        spawned_interface.ic_new_time = self.ic_new_time
+        spawned_interface.ic_burst_penalty = self.ic_burst_penalty
+        spawned_interface.ic_held_release_interval = self.ic_held_release_interval
+
+        spawned_interface.egress_control = self.egress_control
+        spawned_interface.ec_pr_freq = self.ec_pr_freq
+        spawned_interface.ic_pr_burst_freq_new = self.ic_pr_burst_freq_new
+        spawned_interface.ic_pr_burst_freq = self.ic_pr_burst_freq
+
         spawned_interface.target_ip = handler.client_address[0]
         spawned_interface.target_port = str(handler.client_address[1])
         spawned_interface.parent_interface = self
@@ -612,7 +626,7 @@ class TCPServerInterface(Interface):
         spawned_interface.HW_MTU = self.HW_MTU
         spawned_interface.online = True
         RNS.log("Spawned new TCPClient Interface: "+str(spawned_interface), RNS.LOG_VERBOSE)
-        RNS.Transport.interfaces.append(spawned_interface)
+        RNS.Transport.add_interface(spawned_interface)
         while spawned_interface in self.spawned_interfaces:
             self.spawned_interfaces.remove(spawned_interface)
         self.spawned_interfaces.append(spawned_interface)
@@ -623,6 +637,12 @@ class TCPServerInterface(Interface):
 
     def sent_announce(self, from_spawned=False):
         if from_spawned: self.oa_freq_deque.append(time.time())
+
+    def received_path_request(self, from_spawned=False):
+        if from_spawned: self.ip_freq_deque.append(time.time())
+
+    def sent_path_request(self, from_spawned=False):
+        if from_spawned: self.op_freq_deque.append(time.time())
 
     def process_outgoing(self, data):
         pass
